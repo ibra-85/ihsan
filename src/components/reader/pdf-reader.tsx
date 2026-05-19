@@ -520,7 +520,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
             <Link href="/"><HugeiconsIcon icon={ArrowLeft01Icon} /></Link>
           </Button>
           <div className="min-w-0 hidden sm:block">
-            <p className="text-sm font-semibold truncate max-w-[180px] lg:max-w-xs">{doc.title}</p>
+            <p className="text-sm font-semibold truncate max-w-45 lg:max-w-xs">{doc.title}</p>
             {numPages > 0 && <p className="text-xs text-muted-foreground">{numPages} pages</p>}
           </div>
         </div>
@@ -790,7 +790,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
                         width={88}
                         renderTextLayer={false}
                         renderAnnotationLayer={false}
-                        loading={<div className="w-[88px] h-[120px] bg-muted animate-pulse" />}
+                        loading={<div className="w-22 h-30 bg-muted animate-pulse" />}
                       />
                     </div>
                     <span className={cn(

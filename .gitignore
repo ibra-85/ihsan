@@ -43,3 +43,6 @@ next-env.d.ts
 # fichier MD
 CLAUDE.md
 /.agents/
+
+# documents
+/public/docs/
