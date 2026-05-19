@@ -13,8 +13,9 @@ import {
   FilterIcon,
   Tick01Icon,
 } from "@hugeicons/core-free-icons";
-import { DOCUMENTS, CATEGORIES, LANGUAGES, filterDocuments, type DocCategory, type DocLanguage } from "@/lib/documents";
+import { DOCUMENTS, CATEGORIES, LANGUAGES, filterDocuments, getDocumentUrl, type DocCategory, type DocLanguage } from "@/lib/documents";
 import { getLastPage, getReadingTime, formatReadingTime } from "@/lib/store";
+import { useI18n } from "@/components/i18n-provider";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -29,15 +30,11 @@ const LEVEL_CLASS: Record<string, string> = {
   "avance":        "bg-destructive/15 text-destructive",
 };
 
-const LANG: Record<string, string> = {
-  ar: "Arabe", fr: "Français", "ar-fr": "AR / FR",
-  ru: "Russe", ce: "Tchétchène", "ar-ru": "AR / Russe", "ar-ce": "AR / Tchét.",
-};
-
 const CAT_LIST = CATEGORIES.filter(c => c.id !== "all");
 const LANG_LIST = LANGUAGES.filter(l => l.id !== "all");
 
 export default function LibraryContent() {
+  const { t, f, locale } = useI18n();
   const [search, setSearch] = useState("");
   const [cats, setCats]     = useState<Set<DocCategory>>(new Set());
   const [langs, setLangs]   = useState<Set<DocLanguage>>(new Set());
@@ -76,14 +73,15 @@ export default function LibraryContent() {
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleHover = (e: React.PointerEvent, filename: string) => {
-    if (e.pointerType !== "mouse") return; // skip touch/pen
+    if (e.pointerType !== "mouse") return;
     if (prefetchedRef.current.has(filename)) return;
     if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
     hoverTimerRef.current = setTimeout(() => {
       const link = document.createElement("link");
       link.rel = "prefetch";
       link.as = "fetch";
-      link.href = `/docs/${filename}`;
+      link.href = getDocumentUrl(filename);
+      link.crossOrigin = "anonymous";
       document.head.appendChild(link);
       prefetchedRef.current.add(filename);
     }, 250);
@@ -96,13 +94,17 @@ export default function LibraryContent() {
     }
   };
 
+  const resultsText = hasFilters && filtered.length !== DOCUMENTS.length
+    ? f(t.library.resultsFiltered, { n: filtered.length, total: DOCUMENTS.length })
+    : f(t.library.resultsAll, { n: DOCUMENTS.length });
+
   return (
     <div className="max-w-6xl mx-auto px-4 py-8">
 
       {/* En-tête */}
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-foreground mb-1">Bibliothèque Islamique</h1>
-        <p className="text-sm text-muted-foreground">{DOCUMENTS.length} documents disponibles</p>
+        <h1 className="text-2xl font-bold text-foreground mb-1">{t.library.title}</h1>
+        <p className="text-sm text-muted-foreground">{f(t.library.subtitle, { n: DOCUMENTS.length })}</p>
       </div>
 
       {/* Ligne Filtres + Reset */}
@@ -111,7 +113,7 @@ export default function LibraryContent() {
           <PopoverTrigger asChild>
             <Button variant="outline" size="sm" className="gap-2">
               <HugeiconsIcon icon={FilterIcon} data-icon="inline-start" />
-              Filtres
+              {t.library.filters}
               {activeFilterCount > 0 && (
                 <span className="ml-1 size-5 rounded-full bg-primary text-primary-foreground text-[10px] font-bold flex items-center justify-center tabular-nums">
                   {activeFilterCount}
@@ -142,9 +144,8 @@ export default function LibraryContent() {
                   key={`cat-${id}`}
                   onClick={() => toggleCat(id)}
                   className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
-                  title="Retirer ce filtre"
                 >
-                  {c.emoji} {c.label}
+                  {c.emoji} {t.cat[id]}
                   <HugeiconsIcon icon={Cancel01Icon} className="size-3" />
                 </button>
               );
@@ -157,9 +158,8 @@ export default function LibraryContent() {
                   key={`lang-${id}`}
                   onClick={() => toggleLang(id)}
                   className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-muted hover:bg-muted/70 transition-colors"
-                  title="Retirer ce filtre"
                 >
-                  {l.label}
+                  {t.lang[id]}
                   <HugeiconsIcon icon={Cancel01Icon} className="size-3" />
                 </button>
               );
@@ -172,28 +172,28 @@ export default function LibraryContent() {
             size="sm"
             variant="ghost"
             onClick={resetFilters}
-            className="ml-auto text-muted-foreground gap-1 shrink-0"
+            className="ms-auto text-muted-foreground gap-1 shrink-0"
           >
             <HugeiconsIcon icon={Cancel01Icon} className="size-3.5" />
-            Réinitialiser
+            {t.library.reset}
           </Button>
         )}
       </div>
 
       {/* Barre de recherche */}
       <div className="relative mb-5">
-        <HugeiconsIcon icon={Search01Icon} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none size-4" />
+        <HugeiconsIcon icon={Search01Icon} className="absolute start-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none size-4" />
         <Input
           value={search}
           onChange={e => setSearch(e.target.value)}
-          placeholder="Rechercher un document, une sourate, un thème..."
-          className="pl-9 pr-9 h-11 text-sm"
+          placeholder={t.library.searchPlaceholder}
+          className="ps-9 pe-9 h-11 text-sm"
         />
         {search && (
           <button
             onClick={() => setSearch("")}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-            aria-label="Effacer la recherche"
+            className="absolute end-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+            aria-label={t.common.close}
           >
             <HugeiconsIcon icon={Cancel01Icon} className="size-4" />
           </button>
@@ -202,19 +202,14 @@ export default function LibraryContent() {
 
       {/* Compteur de résultats */}
       <div className="flex items-center justify-between mb-4 min-h-[24px]">
-        <p className="text-sm text-muted-foreground">
-          {hasFilters && filtered.length !== DOCUMENTS.length
-            ? <><span className="font-semibold text-foreground">{filtered.length}</span> sur {DOCUMENTS.length} document{DOCUMENTS.length > 1 ? "s" : ""}</>
-            : <><span className="font-semibold text-foreground">{DOCUMENTS.length}</span> document{DOCUMENTS.length > 1 ? "s" : ""}</>
-          }
-        </p>
+        <p className="text-sm text-muted-foreground">{resultsText}</p>
       </div>
 
       {filtered.length === 0 ? (
         <div className="text-center py-16 rounded-xl border bg-card">
           <p className="text-4xl mb-3">📭</p>
-          <p className="text-muted-foreground mb-3">Aucun document trouvé</p>
-          <Button size="sm" variant="outline" onClick={resetFilters}>Effacer les filtres</Button>
+          <p className="text-muted-foreground mb-3">{t.library.empty}</p>
+          <Button size="sm" variant="outline" onClick={resetFilters}>{t.library.emptyAction}</Button>
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -236,7 +231,7 @@ export default function LibraryContent() {
                 <Link href={`/reader/${doc.id}`} className="flex flex-col flex-1 gap-3 px-4 pt-4">
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex-1 min-w-0">
-                      <h3 className="font-semibold text-sm truncate">{doc.title}</h3>
+                      <h3 className="font-semibold text-sm truncate">{doc.title[locale]}</h3>
                       {doc.titleAr && (
                         <p
                           dir="rtl"
@@ -252,16 +247,16 @@ export default function LibraryContent() {
                   </div>
 
                   <p className="text-xs text-muted-foreground leading-relaxed line-clamp-2">
-                    {doc.description}
+                    {doc.description[locale]}
                   </p>
 
                   <div className="flex items-center gap-2 flex-wrap pb-3">
-                    {levelClass && (
+                    {levelClass && doc.level && (
                       <Badge variant="outline" className={cn("text-xs", levelClass)}>
-                        {doc.level}
+                        {t.level[doc.level]}
                       </Badge>
                     )}
-                    <span className="text-xs text-muted-foreground">{LANG[doc.language]}</span>
+                    <span className="text-xs text-muted-foreground">{t.lang[doc.language]}</span>
                   </div>
                 </Link>
 
@@ -272,11 +267,11 @@ export default function LibraryContent() {
                     <Link href={`/reader/${doc.id}`} className="flex items-center gap-1">
                       {lastPage > 1 ? (
                         <span className="flex items-center gap-1 text-xs text-primary">
-                          <HugeiconsIcon icon={Clock01Icon} className="size-3" /> Page {lastPage}
+                          <HugeiconsIcon icon={Clock01Icon} className="size-3" /> {t.common.page} {lastPage}
                         </span>
                       ) : (
                         <span className="flex items-center gap-1 text-xs text-muted-foreground group-hover:text-primary transition-colors">
-                          <HugeiconsIcon icon={BookOpenTextIcon} className="size-3" /> Lire
+                          <HugeiconsIcon icon={BookOpenTextIcon} className="size-3" /> {t.library.read}
                         </span>
                       )}
                     </Link>
@@ -287,13 +282,13 @@ export default function LibraryContent() {
                     )}
                   </div>
                   <div className="flex items-center gap-1">
-                    <Button variant="ghost" size="icon-xs" asChild title="Détails du document">
+                    <Button variant="ghost" size="icon-xs" asChild title={t.library.details}>
                       <Link href={`/doc/${doc.id}`}>
                         <HugeiconsIcon icon={InformationCircleIcon} />
                       </Link>
                     </Button>
                     <Button variant="ghost" size="icon-xs" asChild>
-                      <a href={`/docs/${doc.filename}`} download title="Télécharger">
+                      <a href={getDocumentUrl(doc.filename)} download title={t.library.download} target="_blank" rel="noopener">
                         <HugeiconsIcon icon={Download01Icon} />
                       </a>
                     </Button>
@@ -323,44 +318,33 @@ function FilterPanel({
   onClearCats: () => void;
   onClearLangs: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <div className="flex flex-col max-h-[70vh]">
-      {/* En-tête */}
       <div className="px-4 py-3 border-b flex items-center justify-between">
         <div className="flex items-center gap-2">
           <HugeiconsIcon icon={FilterIcon} className="size-4 text-primary" />
-          <span className="text-sm font-semibold">Filtres</span>
+          <span className="text-sm font-semibold">{t.library.filters}</span>
         </div>
         {(cats.size > 0 || langs.size > 0) && (
           <button
             onClick={() => { onClearCats(); onClearLangs(); }}
             className="text-xs text-muted-foreground hover:text-foreground transition-colors"
           >
-            Tout effacer
+            {t.library.clearAll}
           </button>
         )}
       </div>
 
       <div className="overflow-y-auto p-2">
-        {/* Catégories */}
-        <FilterSection
-          label="Catégorie"
-          activeCount={cats.size}
-          onClear={onClearCats}
-        >
+        <FilterSection label={t.library.category} activeCount={cats.size} onClear={onClearCats}>
           {CAT_LIST.map(c => {
             const id = c.id as DocCategory;
             const count = DOCUMENTS.filter(d => d.category === id).length;
             return (
-              <FilterRow
-                key={c.id}
-                active={cats.has(id)}
-                disabled={count === 0}
-                count={count}
-                onClick={() => onToggleCat(id)}
-              >
-                <span className="text-base mr-2">{c.emoji}</span>
-                {c.label}
+              <FilterRow key={c.id} active={cats.has(id)} disabled={count === 0} count={count} onClick={() => onToggleCat(id)}>
+                <span className="text-base me-2">{c.emoji}</span>
+                {t.cat[id]}
               </FilterRow>
             );
           })}
@@ -368,12 +352,7 @@ function FilterPanel({
 
         <div className="h-px bg-border my-2" />
 
-        {/* Langues */}
-        <FilterSection
-          label="Langue"
-          activeCount={langs.size}
-          onClear={onClearLangs}
-        >
+        <FilterSection label={t.library.language} activeCount={langs.size} onClear={onClearLangs}>
           {LANG_LIST.map(l => {
             const id = l.id as DocLanguage;
             const count = DOCUMENTS.filter(d => d.language === id).length;
@@ -386,7 +365,7 @@ function FilterPanel({
                 onClick={() => onToggleLang(id)}
                 muted={l.id.includes("-")}
               >
-                {l.label}
+                {t.lang[id]}
               </FilterRow>
             );
           })}
@@ -404,19 +383,17 @@ function FilterSection({
   onClear: () => void;
   children: React.ReactNode;
 }) {
+  const { t } = useI18n();
   return (
     <div>
       <div className="flex items-center justify-between px-2 py-1.5">
         <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">
           {label}
-          {activeCount > 0 && <span className="text-primary ml-1">({activeCount})</span>}
+          {activeCount > 0 && <span className="text-primary ms-1">({activeCount})</span>}
         </span>
         {activeCount > 0 && (
-          <button
-            onClick={onClear}
-            className="text-[10px] text-muted-foreground hover:text-foreground"
-          >
-            effacer
+          <button onClick={onClear} className="text-[10px] text-muted-foreground hover:text-foreground">
+            {t.library.clear}
           </button>
         )}
       </div>
@@ -442,7 +419,7 @@ function FilterRow({
       disabled={disabled}
       aria-pressed={active}
       className={cn(
-        "flex items-center justify-between gap-2 px-2 py-1.5 rounded-md text-sm transition-colors text-left",
+        "flex items-center justify-between gap-2 px-2 py-1.5 rounded-md text-sm transition-colors text-start",
         "hover:bg-muted",
         active && "bg-primary/10 text-primary font-medium hover:bg-primary/15",
         disabled && "opacity-40 cursor-not-allowed hover:bg-transparent",
@@ -451,7 +428,7 @@ function FilterRow({
     >
       <span className="flex items-center min-w-0 flex-1">
         <span className={cn(
-          "size-4 rounded border-2 mr-2 shrink-0 flex items-center justify-center transition-colors",
+          "size-4 rounded border-2 me-2 shrink-0 flex items-center justify-center transition-colors",
           active ? "border-primary bg-primary text-primary-foreground" : "border-muted-foreground/30"
         )}>
           {active && <HugeiconsIcon icon={Tick01Icon} className="size-3" />}

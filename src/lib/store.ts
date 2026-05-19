@@ -142,3 +142,61 @@ export function saveSettings(settings: Partial<AppSettings>): void {
   const current = getSettings();
   localStorage.setItem("ql-settings", JSON.stringify({ ...current, ...settings }));
 }
+
+// ─── Export / Import des données ───────────────────────────
+// Permet de transférer ses marque-pages, notes, progression, dessins,
+// préférences vers un autre navigateur ou appareil via un fichier .json.
+
+const BACKUP_APP = "ihsan";
+const BACKUP_VERSION = 1;
+
+/** Télécharge toutes les données locales (clés `ql-*`) en fichier JSON. */
+export function exportAllData(): number {
+  if (typeof window === "undefined") return 0;
+  const data: Record<string, string> = {};
+  for (const k of Object.keys(localStorage)) {
+    if (!k.startsWith("ql-")) continue;
+    const v = localStorage.getItem(k);
+    if (v !== null) data[k] = v;
+  }
+  const payload = {
+    app: BACKUP_APP,
+    version: BACKUP_VERSION,
+    exportedAt: new Date().toISOString(),
+    data,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `ihsan-sauvegarde-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  return Object.keys(data).length;
+}
+
+/** Restaure les données depuis un fichier de sauvegarde JSON. */
+export async function importAllData(file: File): Promise<number> {
+  const text = await file.text();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("Fichier illisible — ce n'est pas un JSON valide.");
+  }
+  const obj = parsed as { app?: string; data?: Record<string, unknown> };
+  if (!obj || obj.app !== BACKUP_APP || typeof obj.data !== "object" || obj.data === null) {
+    throw new Error("Ce fichier n'est pas une sauvegarde Ihsan valide.");
+  }
+  let imported = 0;
+  for (const [k, v] of Object.entries(obj.data)) {
+    if (k.startsWith("ql-") && typeof v === "string") {
+      localStorage.setItem(k, v);
+      imported++;
+    }
+  }
+  if (imported === 0) throw new Error("Aucune donnée à importer dans ce fichier.");
+  return imported;
+}

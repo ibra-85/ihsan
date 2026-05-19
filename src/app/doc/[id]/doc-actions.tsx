@@ -16,6 +16,8 @@ import {
 import {
   getBookmarks, getNotes, getLastPage, getReadingTime, formatReadingTime,
 } from "@/lib/store";
+import { getDocumentUrl } from "@/lib/documents";
+import { useI18n } from "@/components/i18n-provider";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
@@ -28,6 +30,7 @@ export function DocActions({
   title: string;
   totalPages?: number;
 }) {
+  const { t, f } = useI18n();
   const [stats, setStats] = useState({ page: 1, bookmarks: 0, notes: 0, time: 0 });
   const [shared, setShared] = useState(false);
   const [mounted, setMounted] = useState(false);
@@ -67,16 +70,16 @@ export function DocActions({
         <Button asChild size="lg" className="flex-1 h-12 text-base font-semibold">
           <Link href={`/reader/${docId}${hasProgress && stats.page > 1 ? `#p${stats.page}` : ""}`}>
             <HugeiconsIcon icon={BookOpenTextIcon} data-icon="inline-start" />
-            {hasProgress && stats.page > 1 ? `Reprendre p.${stats.page}` : "Lire le document"}
+            {hasProgress && stats.page > 1 ? f(t.doc.resume, { n: stats.page }) : t.doc.readDoc}
           </Link>
         </Button>
         <Button asChild variant="outline" size="lg" className="h-12">
-          <a href={`/docs/${filename}`} download>
+          <a href={getDocumentUrl(filename)} download target="_blank" rel="noopener">
             <HugeiconsIcon icon={Download01Icon} data-icon="inline-start" />
-            Télécharger
+            {t.doc.download}
           </a>
         </Button>
-        <Button variant="outline" size="lg" onClick={share} className="h-12" title="Partager">
+        <Button variant="outline" size="lg" onClick={share} className="h-12" title={t.doc.share}>
           <HugeiconsIcon icon={shared ? CopyCheckIcon : Share01Icon} />
         </Button>
       </div>
@@ -85,7 +88,7 @@ export function DocActions({
       {hasProgress && (
         <Card className="mb-6 p-4 bg-primary/5 border-primary/20">
           <p className="text-xs font-semibold uppercase tracking-wider text-primary mb-3">
-            Votre lecture
+            {t.doc.yourReading}
           </p>
 
           {/* Barre de progression */}
@@ -93,7 +96,7 @@ export function DocActions({
             <div className="mb-4">
               <div className="flex items-center justify-between text-xs mb-1.5">
                 <span className="text-muted-foreground">
-                  Page <span className="font-semibold text-foreground tabular-nums">{stats.page}</span> sur <span className="tabular-nums">{totalPages}</span>
+                  {f(t.doc.pageOf, { n: stats.page, total: totalPages })}
                 </span>
                 <span className="font-semibold text-primary tabular-nums">{progressPct}%</span>
               </div>
@@ -108,16 +111,16 @@ export function DocActions({
 
           {/* Mini stats */}
           <div className="grid grid-cols-3 gap-2">
-            <MiniStat icon={BookBookmark01Icon} value={stats.bookmarks} label={stats.bookmarks > 1 ? "marque-pages" : "marque-page"} />
-            <MiniStat icon={StickyNote01Icon}    value={stats.notes}     label={stats.notes > 1 ? "notes" : "note"} />
-            <MiniStat icon={Clock01Icon}         value={stats.time >= 60 ? formatReadingTime(stats.time) : "—"} label="temps" />
+            <MiniStat icon={BookBookmark01Icon} value={stats.bookmarks} label={t.doc.miscBookmarks} />
+            <MiniStat icon={StickyNote01Icon}    value={stats.notes}     label={t.doc.miscNotes} />
+            <MiniStat icon={Clock01Icon}         value={stats.time >= 60 ? formatReadingTime(stats.time) : "—"} label={t.doc.miscTime} />
           </div>
 
           {stats.page > 1 && (
             <Button asChild size="sm" variant="ghost" className="w-full mt-3 text-primary hover:text-primary hover:bg-primary/10">
               <Link href={`/reader/${docId}#p${stats.page}`}>
-                Reprendre la lecture
-                <HugeiconsIcon icon={ArrowRight01Icon} data-icon="inline-end" />
+                {t.doc.resumeReading}
+                <HugeiconsIcon icon={ArrowRight01Icon} data-icon="inline-end" className="rtl:rotate-180" />
               </Link>
             </Button>
           )}

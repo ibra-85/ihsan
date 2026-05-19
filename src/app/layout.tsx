@@ -2,8 +2,11 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { Inter, Amiri } from "next/font/google";
 import { ThemeProvider } from "@/components/theme-provider";
+import { LanguageProvider } from "@/components/i18n-provider";
 import { NavbarDynamic } from "@/components/navbar-dynamic";
 import { PwaRegister } from "@/components/pwa-register";
+import { ConfirmProvider } from "@/components/confirm-provider";
+import { SonnerToaster } from "@/components/sonner-toaster";
 import { cn } from "@/lib/utils";
 
 const inter  = Inter({ subsets: ['latin'], variable: '--font-sans' });
@@ -43,8 +46,13 @@ export default function RootLayout({
     <html lang="fr" suppressHydrationWarning className={cn("font-sans", inter.variable, amiri.variable)}>
       <body className="min-h-screen flex flex-col antialiased">
         <ThemeProvider>
-          <NavbarDynamic />
-          <main className="flex-1">{children}</main>
+          <LanguageProvider>
+            <ConfirmProvider>
+              <NavbarDynamic />
+              <main className="flex-1">{children}</main>
+            </ConfirmProvider>
+            <SonnerToaster />
+          </LanguageProvider>
         </ThemeProvider>
         <PwaRegister />
       </body>

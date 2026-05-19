@@ -25,9 +25,10 @@ import {
   Copy01Icon,
   CopyCheckIcon,
   More01Icon,
+  PenTool01Icon,
 } from "@hugeicons/core-free-icons";
 import Link from "next/link";
-import type { Document as DocType } from "@/lib/documents";
+import { getDocumentUrl, type Document as DocType } from "@/lib/documents";
 import {
   addBookmark, removeBookmark, isBookmarked,
   getNotes, saveNote, deleteNote, getLastPage, setLastPage,
@@ -39,6 +40,16 @@ import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
+import {
+  AlertDialog, AlertDialogContent, AlertDialogHeader,
+  AlertDialogFooter, AlertDialogTitle, AlertDialogDescription,
+} from "@/components/ui/alert-dialog";
+import { toast } from "sonner";
+import { DrawingLayer } from "./drawing-layer";
+import { DrawingToolbar } from "./drawing-toolbar";
+import { clearPage, drawnPages, getAnnotations, type DrawTool } from "@/lib/annotations";
+import { drawStroke, drawText } from "@/lib/draw-render";
+import { useI18n } from "@/components/i18n-provider";
 import { cn } from "@/lib/utils";
 
 pdfjs.GlobalWorkerOptions.workerSrc =
@@ -49,11 +60,15 @@ const RENDER_WINDOW = 8;
 
 type SearchResult = { page: number; excerpt: string };
 
+type PdfViewport = { width: number; height: number };
+type PdfPage = {
+  getTextContent: () => Promise<{ items: Array<{ str?: string }> }>;
+  getViewport: (opts: { scale: number }) => PdfViewport;
+  render: (opts: { canvasContext: CanvasRenderingContext2D; viewport: PdfViewport }) => { promise: Promise<void> };
+};
 type PdfProxy = {
   numPages: number;
-  getPage: (n: number) => Promise<{
-    getTextContent: () => Promise<{ items: Array<{ str?: string }> }>;
-  }>;
+  getPage: (n: number) => Promise<PdfPage>;
 };
 
 /* ── Composant ligne du menu mobile ───────────────── */
@@ -107,6 +122,7 @@ class PdfErrorBoundary extends Component<
 }
 
 export function PdfReader({ doc }: { doc: DocType }) {
+  const { t, f, locale } = useI18n();
   const [numPages, setNumPages]       = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
   const [scale, setScale]             = useState(1);
@@ -133,6 +149,33 @@ export function PdfReader({ doc }: { doc: DocType }) {
   /* ── Copier lien ──────────────────────────────────── */
   const [copied, setCopied] = useState(false);
 
+  /* ── Mode dessin ──────────────────────────────────── */
+  const [drawMode, setDrawMode]       = useState(false);
+  const [drawTool, setDrawTool]       = useState<DrawTool>("pen");
+  const [drawColor, setDrawColor]     = useState("#dc2626");
+  const [drawWidth, setDrawWidth]     = useState(4);
+  const [textSize, setTextSize]       = useState(24);
+  const [textBold, setTextBold]       = useState(false);
+  const [textItalic, setTextItalic]   = useState(false);
+  const [drawClearVersion, setDrawClearVersion] = useState(0);
+  const [confirmClearOpen, setConfirmClearOpen] = useState(false);
+  const drawModeRef = useRef(drawMode);
+  useEffect(() => { drawModeRef.current = drawMode; }, [drawMode]);
+
+  /* Synchronise les styles de texte quand on ré-édite un texte existant */
+  useEffect(() => {
+    const onStyle = (e: Event) => {
+      const d = (e as CustomEvent<{ size: number; color: string; bold: boolean; italic: boolean }>).detail;
+      if (!d) return;
+      setTextSize(d.size);
+      setDrawColor(d.color);
+      setTextBold(d.bold);
+      setTextItalic(d.italic);
+    };
+    window.addEventListener("ql-text-style", onStyle);
+    return () => window.removeEventListener("ql-text-style", onStyle);
+  }, []);
+
   const containerRef = useRef<HTMLDivElement>(null);
   const pdfCanvasRef = useRef<HTMLDivElement>(null);
   const pageRefs     = useRef<(HTMLDivElement | null)[]>([]);
@@ -141,19 +184,15 @@ export function PdfReader({ doc }: { doc: DocType }) {
   const scaleRef     = useRef(scale);
   useEffect(() => { scaleRef.current = scale; }, [scale]);
 
-  const pdfUrl = `/docs/${doc.filename}`;
+  const pdfUrl = getDocumentUrl(doc.filename);
 
-  // Options PDF.js :
-  //  - Dev (Turbopack) : range requests inconsistantes → "Bad end offset" → on désactive
-  //  - Prod : range requests OK → streaming activé pour afficher les 1ères pages avant fin du DL
+  // Options PDF.js : les PDFs sont sur le CDN Cloudflare qui gère parfaitement
+  // les range requests → streaming activé (1ères pages affichées avant fin du DL).
   // useMemo : éviter de recréer l'objet à chaque render (sinon le PDF est rechargé en boucle).
-  const pdfOptions = useMemo(() => {
-    const isDev = process.env.NODE_ENV !== "production";
-    return {
-      disableRange:  isDev,
-      disableStream: isDev,
-    };
-  }, []);
+  const pdfOptions = useMemo(() => ({
+    disableRange:  false,
+    disableStream: false,
+  }), []);
 
   // État partagé du PDF — évite de parser le fichier 2x pour la sidebar des vignettes
   const [pdfProxy, setPdfProxy] = useState<PdfProxy | null>(null);
@@ -231,6 +270,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
       Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
 
     const onStart = (e: TouchEvent) => {
+      if (drawModeRef.current) return; // dessin actif → pas de pinch
       if (e.touches.length === 2) {
         pinching = true;
         initialDist = dist(e.touches);
@@ -240,6 +280,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
     };
 
     const onMove = (e: TouchEvent) => {
+      if (drawModeRef.current) return;
       if (!pinching || e.touches.length !== 2) return;
       e.preventDefault();
       const factor = dist(e.touches) / initialDist;
@@ -400,6 +441,46 @@ export function PdfReader({ doc }: { doc: DocType }) {
     setRetryKey(k => k + 1);
   }, []);
 
+  /* ── Export PNG des pages annotées ────────────────── */
+  const exportDrawings = async () => {
+    if (!pdfProxy) return;
+    const pages = drawnPages(doc.id);
+    if (pages.length === 0) {
+      toast.info(t.reader.exportEmpty);
+      return;
+    }
+    for (const pageNum of pages) {
+      try {
+        const page = await pdfProxy.getPage(pageNum);
+        const viewport = page.getViewport({ scale: 2 });
+        const canvas = document.createElement("canvas");
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) continue;
+        await page.render({ canvasContext: ctx, viewport }).promise;
+        const { strokes, texts } = getAnnotations(doc.id, pageNum);
+        for (const s of strokes) drawStroke(ctx, s, canvas.width, canvas.height);
+        for (const tn of texts) drawText(ctx, tn, canvas.width, canvas.height);
+        const blob = await new Promise<Blob | null>(res => canvas.toBlob(res, "image/png"));
+        if (blob) {
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = `${doc.id}-p${pageNum}.png`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+          await new Promise(r => setTimeout(r, 250));
+        }
+      } catch {
+        /* page en échec — on continue */
+      }
+    }
+    toast.success(f(t.reader.exportDone, { n: pages.length }));
+  };
+
   /* ── Copier le lien ───────────────────────────────── */
   const copyLink = () => {
     const url = `${window.location.origin}/reader/${doc.id}#p${currentPage}`;
@@ -457,19 +538,33 @@ export function PdfReader({ doc }: { doc: DocType }) {
       >
         <div className="text-[10px] text-white/60 font-mono select-none">{pageNum}</div>
         {inWindow ? (
-          <Page
-            pageNumber={pageNum}
-            scale={scale}
-            renderTextLayer={false}
-            renderAnnotationLayer={false}
-            className="shadow-lg rounded overflow-hidden"
-            loading={
-              <div
-                className="bg-muted/30 rounded animate-pulse"
-                style={{ width: `${Math.round(595 * scale)}px`, height: `${Math.round(842 * scale)}px` }}
-              />
-            }
-          />
+          <div className="relative shadow-lg rounded overflow-hidden">
+            <Page
+              pageNumber={pageNum}
+              scale={scale}
+              renderTextLayer={false}
+              renderAnnotationLayer={false}
+              loading={
+                <div
+                  className="bg-muted/30 rounded animate-pulse"
+                  style={{ width: `${Math.round(595 * scale)}px`, height: `${Math.round(842 * scale)}px` }}
+                />
+              }
+            />
+            <DrawingLayer
+              key={`${doc.id}-${pageNum}-${drawClearVersion}`}
+              docId={doc.id}
+              pageNumber={pageNum}
+              enabled={drawMode}
+              isCurrent={pageNum === currentPage}
+              tool={drawTool}
+              color={drawColor}
+              strokeWidth={drawWidth}
+              textSize={textSize}
+              textBold={textBold}
+              textItalic={textItalic}
+            />
+          </div>
         ) : (
           <div
             className="bg-white/10 rounded"
@@ -483,14 +578,14 @@ export function PdfReader({ doc }: { doc: DocType }) {
   const errorFallback = (
     <div className="flex flex-col items-center justify-center h-60 gap-3 text-center px-6">
       <p className="text-4xl">⚠️</p>
-      <p className="font-semibold text-destructive">Échec du chargement</p>
+      <p className="font-semibold text-destructive">{t.reader.loadErrorTitle}</p>
       <p className="text-sm text-muted-foreground max-w-sm">
-        Ce fichier PDF ne peut pas être affiché.
+        {t.reader.loadErrorDesc}
       </p>
       <div className="flex items-center gap-2">
-        <Button size="sm" variant="outline" onClick={retryLoad}>Réessayer</Button>
+        <Button size="sm" variant="outline" onClick={retryLoad}>{t.reader.retry}</Button>
         <Button asChild size="sm" variant="ghost">
-          <a href={pdfUrl} download>Télécharger</a>
+          <a href={pdfUrl} download>{t.reader.download}</a>
         </Button>
       </div>
     </div>
@@ -500,7 +595,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
   return (
     <div
       ref={containerRef}
-      className="flex flex-col bg-background"
+      className="relative flex flex-col bg-background"
       style={{ height: "100dvh" }}
     >
       {/* ── Toolbar ─────────────────────────────────────── */}
@@ -511,17 +606,17 @@ export function PdfReader({ doc }: { doc: DocType }) {
           <Button
             variant="ghost" size="icon-sm"
             onClick={() => setShowThumbs(v => !v)}
-            title="Vignettes de pages"
+            title={t.reader.thumbnails}
             className={cn(showThumbs ? "text-primary" : "text-muted-foreground")}
           >
             <HugeiconsIcon icon={SidebarLeft01Icon} />
           </Button>
           <Button asChild variant="ghost" size="icon-sm">
-            <Link href="/"><HugeiconsIcon icon={ArrowLeft01Icon} /></Link>
+            <Link href="/"><HugeiconsIcon icon={ArrowLeft01Icon} className="rtl:rotate-180" /></Link>
           </Button>
           <div className="min-w-0 hidden sm:block">
-            <p className="text-sm font-semibold truncate max-w-45 lg:max-w-xs">{doc.title}</p>
-            {numPages > 0 && <p className="text-xs text-muted-foreground">{numPages} pages</p>}
+            <p className="text-sm font-semibold truncate max-w-45 lg:max-w-xs">{doc.title[locale]}</p>
+            {numPages > 0 && <p className="text-xs text-muted-foreground">{numPages} {t.reader.pages}</p>}
           </div>
         </div>
 
@@ -530,14 +625,14 @@ export function PdfReader({ doc }: { doc: DocType }) {
 
           {/* Zoom — desktop uniquement */}
           <div className="hidden sm:flex items-center gap-0.5">
-            <Button variant="ghost" size="icon-sm" onClick={zoomOut} title="Zoom -">
+            <Button variant="ghost" size="icon-sm" onClick={zoomOut} title={t.reader.zoomOut}>
               <HugeiconsIcon icon={ZoomOutAreaIcon} />
             </Button>
             <span className="text-xs w-10 text-center font-mono tabular-nums">{Math.round(scale * 100)}%</span>
-            <Button variant="ghost" size="icon-sm" onClick={zoomIn} title="Zoom +">
+            <Button variant="ghost" size="icon-sm" onClick={zoomIn} title={t.reader.zoomIn}>
               <HugeiconsIcon icon={ZoomInAreaIcon} />
             </Button>
-            <Button variant="ghost" size="icon-sm" onClick={() => setScale(1)} title="Réinitialiser zoom">
+            <Button variant="ghost" size="icon-sm" onClick={() => setScale(1)} title={t.reader.zoomReset}>
               <HugeiconsIcon icon={Rotate01Icon} />
             </Button>
             <Separator orientation="vertical" className="h-6 mx-1.5" />
@@ -547,7 +642,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
           <Button
             variant="ghost" size="icon-sm"
             onClick={toggleContinuous}
-            title={continuous ? "Mode paginé" : "Mode lecture continue"}
+            title={continuous ? t.reader.continuousOff : t.reader.continuousOn}
             className={cn("hidden sm:flex", continuous ? "text-primary" : "text-muted-foreground")}
           >
             <HugeiconsIcon icon={continuous ? File01Icon : LayoutThreeRowIcon} />
@@ -559,7 +654,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
           <Button
             variant="ghost" size="icon-sm"
             onClick={() => setShowSearch(v => !v)}
-            title="Rechercher dans le PDF (Ctrl+F)"
+            title={t.reader.searchTitle}
             className={cn(showSearch ? "text-primary" : "text-muted-foreground")}
           >
             <HugeiconsIcon icon={Search01Icon} />
@@ -569,7 +664,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
           <Button
             variant="ghost" size="icon-sm"
             onClick={toggleBookmark}
-            title="Marque-page"
+            title={t.reader.bookmark}
             className={cn(bookmarked ? "text-primary" : "text-muted-foreground")}
           >
             <HugeiconsIcon icon={bookmarked ? BookmarkCheck01Icon : Bookmark01Icon} />
@@ -579,7 +674,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
           <Button
             variant="ghost" size="icon-sm"
             onClick={() => setShowNotes(v => !v)}
-            title="Notes"
+            title={t.reader.notes}
             className={cn("relative", showNotes ? "text-primary" : "text-muted-foreground")}
           >
             <HugeiconsIcon icon={StickyNote01Icon} />
@@ -590,23 +685,33 @@ export function PdfReader({ doc }: { doc: DocType }) {
             )}
           </Button>
 
+          {/* Mode dessin — toujours visible */}
+          <Button
+            variant="ghost" size="icon-sm"
+            onClick={() => setDrawMode(v => !v)}
+            title={t.reader.drawMode}
+            className={cn(drawMode ? "text-primary" : "text-muted-foreground")}
+          >
+            <HugeiconsIcon icon={PenTool01Icon} />
+          </Button>
+
           {/* Actions secondaires — desktop uniquement */}
           <div className="hidden sm:flex items-center gap-0.5">
             <Separator orientation="vertical" className="h-6 mx-1.5" />
             <Button
               variant="ghost" size="icon-sm"
               onClick={copyLink}
-              title="Copier le lien vers cette page"
+              title={t.reader.copyLink}
               className={cn(copied ? "text-success" : "text-muted-foreground")}
             >
               <HugeiconsIcon icon={copied ? CopyCheckIcon : Copy01Icon} />
             </Button>
-            <Button variant="ghost" size="icon-sm" asChild title="Télécharger">
+            <Button variant="ghost" size="icon-sm" asChild title={t.reader.download}>
               <a href={pdfUrl} download><HugeiconsIcon icon={Download01Icon} /></a>
             </Button>
             <Button
               variant="ghost" size="icon-sm"
-              title="Plein écran"
+              title={t.reader.fullscreen}
               onClick={() => {
                 if (!document.fullscreenElement) {
                   containerRef.current?.requestFullscreen();
@@ -627,8 +732,8 @@ export function PdfReader({ doc }: { doc: DocType }) {
               <Button
                 variant="ghost" size="icon-sm"
                 className="sm:hidden text-muted-foreground"
-                title="Plus d'options"
-                aria-label="Plus d'options"
+                title={t.reader.moreOptions}
+                aria-label={t.reader.moreOptions}
               >
                 <HugeiconsIcon icon={More01Icon} />
               </Button>
@@ -639,20 +744,20 @@ export function PdfReader({ doc }: { doc: DocType }) {
               <div className="px-2 py-1.5">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">
-                    Zoom
+                    {t.reader.zoom}
                   </span>
                   <span className="text-xs font-mono tabular-nums text-muted-foreground">
                     {Math.round(scale * 100)}%
                   </span>
                 </div>
                 <div className="flex items-center gap-1">
-                  <Button variant="outline" size="icon-sm" onClick={zoomOut} className="flex-1" title="Zoom -">
+                  <Button variant="outline" size="icon-sm" onClick={zoomOut} className="flex-1" title={t.reader.zoomOut}>
                     <HugeiconsIcon icon={ZoomOutAreaIcon} />
                   </Button>
-                  <Button variant="outline" size="icon-sm" onClick={() => setScale(1)} className="flex-1" title="Réinitialiser">
+                  <Button variant="outline" size="icon-sm" onClick={() => setScale(1)} className="flex-1" title={t.reader.zoomReset}>
                     <HugeiconsIcon icon={Rotate01Icon} />
                   </Button>
-                  <Button variant="outline" size="icon-sm" onClick={zoomIn} className="flex-1" title="Zoom +">
+                  <Button variant="outline" size="icon-sm" onClick={zoomIn} className="flex-1" title={t.reader.zoomIn}>
                     <HugeiconsIcon icon={ZoomInAreaIcon} />
                   </Button>
                 </div>
@@ -666,7 +771,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
                 onClick={toggleContinuous}
                 active={continuous}
               >
-                Mode lecture continue
+                {t.reader.continuousOn}
               </MobileMenuItem>
 
               <MobileMenuItem
@@ -682,7 +787,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
                 }}
                 active={fullscreen}
               >
-                {fullscreen ? "Quitter le plein écran" : "Plein écran"}
+                {fullscreen ? t.reader.fullscreenExit : t.reader.fullscreen}
               </MobileMenuItem>
 
               <div className="h-px bg-border my-1" />
@@ -693,7 +798,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
                 onClick={copyLink}
                 tint={copied ? "success" : undefined}
               >
-                {copied ? "Lien copié !" : "Copier le lien"}
+                {copied ? t.reader.linkCopied : t.reader.copyLink}
               </MobileMenuItem>
 
               <a
@@ -702,7 +807,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
                 className="flex items-center gap-2.5 px-2 py-2 rounded-md text-sm hover:bg-muted transition-colors w-full"
               >
                 <HugeiconsIcon icon={Download01Icon} className="size-4 shrink-0 text-muted-foreground" />
-                <span className="flex-1 text-left">Télécharger</span>
+                <span className="flex-1 text-start">{t.reader.download}</span>
               </a>
             </PopoverContent>
           </Popover>
@@ -719,16 +824,16 @@ export function PdfReader({ doc }: { doc: DocType }) {
               value={searchQuery}
               onChange={e => { setSearchQuery(e.target.value); setSearchResults([]); }}
               onKeyDown={e => { if (e.key === "Enter") searchInPdf(); if (e.key === "Escape") setShowSearch(false); }}
-              placeholder="Rechercher dans le texte… (Entrée pour lancer)"
+              placeholder={t.reader.searchPlaceholder}
               className="h-8 text-sm flex-1"
             />
             <Button size="sm" onClick={searchInPdf} disabled={!searchQuery.trim() || searching} className="shrink-0">
               {searching
                 ? <span className="size-3.5 rounded-full border-2 border-primary-foreground border-t-transparent animate-spin inline-block" />
-                : "Chercher"
+                : t.reader.searchRun
               }
             </Button>
-            <Button variant="ghost" size="icon-sm" onClick={() => setShowSearch(false)} title="Fermer (Échap)">
+            <Button variant="ghost" size="icon-sm" onClick={() => setShowSearch(false)} title={t.common.close}>
               <HugeiconsIcon icon={Cancel01Icon} />
             </Button>
           </div>
@@ -736,8 +841,8 @@ export function PdfReader({ doc }: { doc: DocType }) {
           {searchResults.length > 0 && (
             <div className="flex items-center gap-2 overflow-x-auto">
               <span className="text-xs text-muted-foreground shrink-0">
-                {searchResults.length} résultat{searchResults.length > 1 ? "s" : ""}
-                {searchResults.length >= 50 ? " (max 50)" : ""} →
+                {f(t.reader.searchResults, { n: searchResults.length })}
+                {searchResults.length >= 50 ? ` ${t.reader.searchMax}` : ""} →
               </span>
               {searchResults.map(r => (
                 <button
@@ -753,7 +858,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
           )}
           {!searching && searchResults.length === 0 && searchQuery.trim() && (
             <p className="text-xs text-muted-foreground">
-              Aucun résultat — ce PDF ne contient probablement pas de couche texte (PDF scanné).
+              {t.reader.searchNone}
             </p>
           )}
         </div>
@@ -766,10 +871,10 @@ export function PdfReader({ doc }: { doc: DocType }) {
         {showThumbs && pdfProxy && numPages > 0 && !loadError && (
           <div className="w-36 border-r bg-card flex flex-col shrink-0 overflow-hidden">
             <p className="text-[10px] font-semibold text-muted-foreground px-3 py-2 border-b uppercase tracking-wide">
-              Pages ({numPages})
+              {t.reader.pagesPanel} ({numPages})
             </p>
             <div className="flex-1 overflow-y-auto py-2 flex flex-col gap-1 items-center">
-              <PdfErrorBoundary fallback={<p className="text-xs text-muted-foreground p-2 text-center">Aperçu indisponible</p>}>
+              <PdfErrorBoundary fallback={<p className="text-xs text-muted-foreground p-2 text-center">{t.reader.previewUnavailable}</p>}>
                 {Array.from({ length: numPages }, (_, i) => i + 1).map(pageNum => (
                   <button
                     key={pageNum}
@@ -818,7 +923,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
                 {progress && progress.total > 0 ? (
                   <div className="w-full">
                     <div className="flex items-center justify-between text-xs mb-1.5">
-                      <span className="text-muted-foreground">Téléchargement</span>
+                      <span className="text-muted-foreground">{t.reader.downloading}</span>
                       <span className="font-mono tabular-nums font-semibold text-primary">
                         {Math.round((progress.loaded / progress.total) * 100)}%
                       </span>
@@ -836,7 +941,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
                 ) : (
                   <>
                     <div className="size-8 rounded-full border-2 border-primary border-t-transparent animate-spin" />
-                    <p className="text-sm text-muted-foreground">Chargement du document…</p>
+                    <p className="text-sm text-muted-foreground">{t.reader.loading}</p>
                   </>
                 )}
               </div>
@@ -872,13 +977,27 @@ export function PdfReader({ doc }: { doc: DocType }) {
                 {continuous
                   ? Array.from({ length: numPages }, (_, i) => renderContinuousPage(i + 1))
                   : (
-                    <Page
-                      pageNumber={currentPage}
-                      scale={scale}
-                      renderTextLayer={false}
-                      renderAnnotationLayer={false}
-                      className="shadow-lg rounded overflow-hidden"
-                    />
+                    <div className="relative shadow-lg rounded overflow-hidden">
+                      <Page
+                        pageNumber={currentPage}
+                        scale={scale}
+                        renderTextLayer={false}
+                        renderAnnotationLayer={false}
+                      />
+                      <DrawingLayer
+                        key={`${doc.id}-${currentPage}-${drawClearVersion}`}
+                        docId={doc.id}
+                        pageNumber={currentPage}
+                        enabled={drawMode}
+                        isCurrent={true}
+                        tool={drawTool}
+                        color={drawColor}
+                        strokeWidth={drawWidth}
+                        textSize={textSize}
+                        textBold={textBold}
+                        textItalic={textItalic}
+                      />
+                    </div>
                   )
                 }
               </Document>
@@ -890,12 +1009,12 @@ export function PdfReader({ doc }: { doc: DocType }) {
         {showNotes && (
           <div className="w-64 sm:w-72 border-l bg-card flex flex-col shrink-0">
             <div className="flex items-center justify-between px-4 py-2.5 border-b">
-              <span className="text-sm font-semibold">Notes — p.{currentPage}</span>
+              <span className="text-sm font-semibold">{f(t.reader.notesTitle, { n: currentPage })}</span>
               <div className="flex items-center gap-1">
                 {notes.length > 0 && (
                   <Button
                     variant="ghost" size="icon-xs"
-                    title="Exporter les notes (.txt)"
+                    title={t.reader.notesExport}
                     onClick={() => exportNotesAsTxt(doc.id)}
                   >
                     <HugeiconsIcon icon={Download01Icon} />
@@ -910,7 +1029,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
             <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-2">
               {pageNotes.length === 0 && (
                 <p className="text-xs text-muted-foreground text-center py-6">
-                  Aucune note sur cette page
+                  {t.reader.notesEmpty}
                 </p>
               )}
               {pageNotes.map(n => (
@@ -931,21 +1050,21 @@ export function PdfReader({ doc }: { doc: DocType }) {
               <Textarea
                 value={newNote}
                 onChange={e => setNewNote(e.target.value)}
-                placeholder="Ajouter une note..."
+                placeholder={t.reader.notePlaceholder}
                 rows={3}
                 onKeyDown={e => { if (e.key === "Enter" && e.ctrlKey) addNote(); }}
               />
               <Button onClick={addNote} disabled={!newNote.trim()} size="sm" className="w-full">
                 <HugeiconsIcon icon={PlusSignIcon} data-icon="inline-start" />
-                Ajouter (Ctrl+Entrée)
+                {t.reader.noteAdd}
               </Button>
             </div>
           </div>
         )}
       </div>
 
-      {/* ── Navigation bas de page ──────────────────────── */}
-      <div className="flex items-center justify-center gap-1 px-3 py-2 border-t bg-card shrink-0">
+      {/* ── Navigation bas de page (toujours LTR : pagination universelle) ── */}
+      <div dir="ltr" className="flex items-center justify-center gap-1 px-3 py-2 border-t bg-card shrink-0">
         <Button variant="ghost" size="icon-sm" onClick={() => goTo(1)} disabled={currentPage <= 1}>⏮</Button>
         <Button variant="ghost" size="icon-sm" onClick={() => goTo(currentPage - 1)} disabled={currentPage <= 1}>
           <HugeiconsIcon icon={ArrowLeft01Icon} />
@@ -966,6 +1085,56 @@ export function PdfReader({ doc }: { doc: DocType }) {
         </Button>
         <Button variant="ghost" size="icon-sm" onClick={() => goTo(numPages)} disabled={currentPage >= numPages}>⏭</Button>
       </div>
+
+      {/* ── Barre d'outils de dessin ────────────────────── */}
+      {drawMode && (
+        <DrawingToolbar
+          tool={drawTool}
+          color={drawColor}
+          strokeWidth={drawWidth}
+          textSize={textSize}
+          textBold={textBold}
+          textItalic={textItalic}
+          onToolChange={setDrawTool}
+          onColorChange={setDrawColor}
+          onWidthChange={setDrawWidth}
+          onTextSizeChange={setTextSize}
+          onTextBoldChange={setTextBold}
+          onTextItalicChange={setTextItalic}
+          onExport={exportDrawings}
+          onClearPage={() => setConfirmClearOpen(true)}
+          onClose={() => setDrawMode(false)}
+        />
+      )}
+
+      {/* ── Confirmation : effacer les dessins de la page ── */}
+      <AlertDialog open={confirmClearOpen} onOpenChange={setConfirmClearOpen}>
+        <AlertDialogContent container={containerRef.current}>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t.reader.clearDrawTitle}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {f(t.reader.clearDrawDesc, { n: currentPage })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <Button variant="outline" size="sm" onClick={() => setConfirmClearOpen(false)}>
+              {t.common.cancel}
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => {
+                clearPage(doc.id, currentPage);
+                setDrawClearVersion(v => v + 1);
+                setConfirmClearOpen(false);
+                toast.success(f(t.reader.clearDrawToast, { n: currentPage }));
+              }}
+            >
+              {t.common.delete}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

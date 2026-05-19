@@ -1,7 +1,9 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
+import { toast } from "sonner";
 import { useTheme } from "@/components/theme-provider";
+import { useI18n } from "@/components/i18n-provider";
 import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
 import {
   Setting06Icon,
@@ -9,6 +11,7 @@ import {
   Sun01Icon,
   ComputerIcon,
   Download01Icon,
+  Upload01Icon,
   StickyNote01Icon,
   BookBookmark01Icon,
   Clock01Icon,
@@ -20,26 +23,31 @@ import {
 } from "@hugeicons/core-free-icons";
 import {
   getSettings, saveSettings, getNotes, exportNotesAsTxt, getBookmarks,
+  exportAllData, importAllData,
   type AppSettings,
 } from "@/lib/store";
+import type { Dictionary } from "@/lib/dictionaries";
+import { useConfirm } from "@/components/confirm-provider";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 
-const ACCENTS: { id: AppSettings["accent"]; label: string; value: string }[] = [
-  { id: "green",  label: "Vert",   value: "oklch(0.527 0.154 150.069)" },
-  { id: "blue",   label: "Bleu",   value: "oklch(0.546 0.245 262.881)" },
-  { id: "purple", label: "Violet", value: "oklch(0.491 0.27 292.581)"  },
-  { id: "amber",  label: "Doré",   value: "oklch(0.666 0.179 58.318)"  },
-  { id: "rose",   label: "Rose",   value: "oklch(0.586 0.253 17.585)"  },
+type SettingsKey = keyof Dictionary["settings"];
+
+const ACCENTS: { id: AppSettings["accent"]; labelKey: SettingsKey; value: string }[] = [
+  { id: "green",  labelKey: "accentGreen",  value: "oklch(0.527 0.154 150.069)" },
+  { id: "blue",   labelKey: "accentBlue",   value: "oklch(0.546 0.245 262.881)" },
+  { id: "purple", labelKey: "accentPurple", value: "oklch(0.491 0.27 292.581)"  },
+  { id: "amber",  labelKey: "accentAmber",  value: "oklch(0.666 0.179 58.318)"  },
+  { id: "rose",   labelKey: "accentRose",   value: "oklch(0.586 0.253 17.585)"  },
 ];
 
-const THEMES: { id: "system" | "light" | "dark"; label: string; icon: IconSvgElement }[] = [
-  { id: "system", label: "Système", icon: ComputerIcon },
-  { id: "light",  label: "Clair",   icon: Sun01Icon    },
-  { id: "dark",   label: "Sombre",  icon: Moon01Icon   },
+const THEMES: { id: "system" | "light" | "dark"; labelKey: SettingsKey; icon: IconSvgElement }[] = [
+  { id: "system", labelKey: "themeSystem", icon: ComputerIcon },
+  { id: "light",  labelKey: "themeLight",  icon: Sun01Icon    },
+  { id: "dark",   labelKey: "themeDark",   icon: Moon01Icon   },
 ];
 
 function formatDuration(seconds: number): string {
@@ -56,23 +64,25 @@ function readLocalStorageSize(): number {
   let total = 0;
   for (const k of Object.keys(localStorage)) {
     if (!k.startsWith("ql-")) continue;
-    total += (k.length + (localStorage.getItem(k)?.length ?? 0)) * 2; // UTF-16
+    total += (k.length + (localStorage.getItem(k)?.length ?? 0)) * 2;
   }
   return total;
 }
 
 function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} o`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} Ko`;
-  return `${(bytes / 1024 / 1024).toFixed(2)} Mo`;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 }
 
 export default function SettingsContent() {
   const { theme, setTheme } = useTheme();
+  const { t, f } = useI18n();
+  const confirm = useConfirm();
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [mounted, setMounted] = useState(false);
   const [accent, setAccent] = useState<AppSettings["accent"]>("green");
 
-  // Stats locales
   const [stats, setStats] = useState({ bookmarks: 0, notes: 0, docs: 0, readSec: 0, bytes: 0 });
 
   const refreshStats = () => {
@@ -107,8 +117,13 @@ export default function SettingsContent() {
     window.dispatchEvent(new Event("ql-settings-change"));
   };
 
-  const clearKeys = (keys: string[], confirmMsg: string, successMsg: string) => {
-    if (!confirm(confirmMsg)) return;
+  const clearKeys = async (
+    keys: string[], title: string, description: string, successMsg: string,
+  ) => {
+    const ok = await confirm({
+      title, description, confirmText: t.common.delete, cancelText: t.common.cancel, destructive: true,
+    });
+    if (!ok) return;
     keys.forEach(k => {
       if (k.endsWith("*")) {
         const prefix = k.slice(0, -1);
@@ -118,10 +133,35 @@ export default function SettingsContent() {
       }
     });
     refreshStats();
-    alert(successMsg);
+    toast.success(successMsg);
   };
 
-  const currentAccentLabel = useMemo(() => ACCENTS.find(c => c.id === accent)?.label, [accent]);
+  const handleExport = () => {
+    exportAllData();
+    toast.success(t.settings.toastExported);
+  };
+
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    const ok = await confirm({
+      title: t.settings.confirmImportTitle,
+      description: t.settings.confirmImportDesc,
+      confirmText: t.settings.import,
+      cancelText: t.common.cancel,
+    });
+    if (!ok) return;
+    try {
+      await importAllData(file);
+      toast.success(t.settings.toastImported);
+      setTimeout(() => window.location.reload(), 900);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t.settings.toastImportError);
+    }
+  };
+
+  const currentAccent = useMemo(() => ACCENTS.find(c => c.id === accent), [accent]);
 
   return (
     <div className="max-w-2xl mx-auto px-4 py-8">
@@ -132,8 +172,8 @@ export default function SettingsContent() {
           <HugeiconsIcon icon={Setting06Icon} className="size-5 text-primary" />
         </div>
         <div>
-          <h1 className="text-xl font-bold">Paramètres</h1>
-          <p className="text-sm text-muted-foreground">Personnalisez l&apos;application et gérez vos données</p>
+          <h1 className="text-xl font-bold">{t.settings.title}</h1>
+          <p className="text-sm text-muted-foreground">{t.settings.subtitle}</p>
         </div>
       </div>
 
@@ -144,18 +184,18 @@ export default function SettingsContent() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <HugeiconsIcon icon={PaintBrush01Icon} className="size-4 text-primary" />
-              Apparence
+              {t.settings.appearance}
             </CardTitle>
-            <CardDescription>Thème et couleur d&apos;accent</CardDescription>
+            <CardDescription>{t.settings.appearanceDesc}</CardDescription>
           </CardHeader>
           <Separator />
           <CardContent className="pt-5 flex flex-col gap-6">
 
             {/* Thème */}
             <div>
-              <p className="text-sm font-medium mb-3">Thème</p>
+              <p className="text-sm font-medium mb-3">{t.settings.theme}</p>
               <div className="grid grid-cols-3 gap-2">
-                {THEMES.map(({ id, label, icon }) => {
+                {THEMES.map(({ id, labelKey, icon }) => {
                   const active = mounted && theme === id;
                   return (
                     <button
@@ -169,17 +209,17 @@ export default function SettingsContent() {
                       )}
                     >
                       <HugeiconsIcon icon={icon} className="size-5" />
-                      <span className="text-xs font-semibold">{label}</span>
+                      <span className="text-xs font-semibold">{t.settings[labelKey]}</span>
                     </button>
                   );
                 })}
               </div>
             </div>
 
-            {/* Accent — Select dropdown */}
+            {/* Accent */}
             <div>
               <label htmlFor="accent-select" className="block text-sm font-medium mb-3">
-                Couleur d&apos;accent
+                {t.settings.accent}
               </label>
               <Select value={accent} onValueChange={(v) => changeAccent(v as AppSettings["accent"])}>
                 <SelectTrigger id="accent-select" className="w-full">
@@ -187,9 +227,9 @@ export default function SettingsContent() {
                     <span className="flex items-center gap-2.5">
                       <span
                         className="size-4 rounded-full shrink-0 ring-1 ring-border"
-                        style={{ background: ACCENTS.find(c => c.id === accent)?.value }}
+                        style={{ background: currentAccent?.value }}
                       />
-                      <span>{currentAccentLabel}</span>
+                      <span>{currentAccent ? t.settings[currentAccent.labelKey] : ""}</span>
                     </span>
                   </SelectValue>
                 </SelectTrigger>
@@ -201,15 +241,13 @@ export default function SettingsContent() {
                           className="size-4 rounded-full shrink-0 ring-1 ring-border"
                           style={{ background: c.value }}
                         />
-                        <span>{c.label}</span>
+                        <span>{t.settings[c.labelKey]}</span>
                       </span>
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
-              <p className="text-xs text-muted-foreground mt-2">
-                Appliquée aux liens, boutons et accents visuels
-              </p>
+              <p className="text-xs text-muted-foreground mt-2">{t.settings.accentHint}</p>
             </div>
           </CardContent>
         </Card>
@@ -219,17 +257,17 @@ export default function SettingsContent() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <HugeiconsIcon icon={Clock01Icon} className="size-4 text-primary" />
-              Vos statistiques
+              {t.settings.stats}
             </CardTitle>
-            <CardDescription>Aperçu de votre activité de lecture</CardDescription>
+            <CardDescription>{t.settings.statsDesc}</CardDescription>
           </CardHeader>
           <Separator />
           <CardContent className="pt-5">
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <StatCard icon={BookBookmark01Icon} label="Marque-pages" value={stats.bookmarks} />
-              <StatCard icon={StickyNote01Icon}    label="Notes"        value={stats.notes} />
-              <StatCard icon={BookOpenTextIcon}    label="Documents lus" value={stats.docs} />
-              <StatCard icon={Clock01Icon}         label="Temps total"   value={stats.readSec >= 60 ? formatDuration(stats.readSec) : "—"} small />
+              <StatCard icon={BookBookmark01Icon} label={t.settings.statBookmarks} value={stats.bookmarks} />
+              <StatCard icon={StickyNote01Icon}    label={t.settings.statNotes}     value={stats.notes} />
+              <StatCard icon={BookOpenTextIcon}    label={t.settings.statDocs}      value={stats.docs} />
+              <StatCard icon={Clock01Icon}         label={t.settings.statTime}      value={stats.readSec >= 60 ? formatDuration(stats.readSec) : "—"} small />
             </div>
           </CardContent>
         </Card>
@@ -239,22 +277,19 @@ export default function SettingsContent() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <HugeiconsIcon icon={Database01Icon} className="size-4 text-primary" />
-              Données locales
+              {t.settings.data}
             </CardTitle>
             <CardDescription>
-              Toutes vos données sont stockées localement ({formatBytes(stats.bytes)})
+              {f(t.settings.dataDesc, { size: formatBytes(stats.bytes) })}
             </CardDescription>
           </CardHeader>
           <Separator />
           <CardContent className="pt-5 flex flex-col gap-2">
 
-            {/* Export */}
             <div className="flex items-center justify-between gap-3 p-3 rounded-lg bg-muted/40">
               <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium">Exporter les notes</p>
-                <p className="text-xs text-muted-foreground">
-                  Téléchargez toutes vos notes au format .txt
-                </p>
+                <p className="text-sm font-medium">{t.settings.exportNotes}</p>
+                <p className="text-xs text-muted-foreground">{t.settings.exportNotesDesc}</p>
               </div>
               <Button
                 variant="outline"
@@ -264,16 +299,15 @@ export default function SettingsContent() {
                 className="shrink-0"
               >
                 <HugeiconsIcon icon={Download01Icon} data-icon="inline-start" />
-                Exporter
+                {t.settings.export}
               </Button>
             </div>
 
-            {/* Suppressions ciblées */}
             <div className="flex items-center justify-between gap-3 p-3 rounded-lg bg-muted/40">
               <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium">Supprimer les marque-pages</p>
+                <p className="text-sm font-medium">{t.settings.delBookmarks}</p>
                 <p className="text-xs text-muted-foreground">
-                  {stats.bookmarks} entrée{stats.bookmarks > 1 ? "s" : ""} sauvegardée{stats.bookmarks > 1 ? "s" : ""}
+                  {f(t.settings.delBookmarksCount, { n: stats.bookmarks })}
                 </p>
               </div>
               <Button
@@ -282,8 +316,9 @@ export default function SettingsContent() {
                 disabled={stats.bookmarks === 0}
                 onClick={() => clearKeys(
                   ["ql-bookmarks"],
-                  `Supprimer les ${stats.bookmarks} marque-pages ?`,
-                  "Marque-pages supprimés."
+                  t.settings.delBookmarks,
+                  t.settings.confirmDelTitle,
+                  t.settings.toastBookmarksDel,
                 )}
                 className="shrink-0 text-muted-foreground hover:text-destructive"
               >
@@ -293,9 +328,9 @@ export default function SettingsContent() {
 
             <div className="flex items-center justify-between gap-3 p-3 rounded-lg bg-muted/40">
               <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium">Supprimer les notes</p>
+                <p className="text-sm font-medium">{t.settings.delNotes}</p>
                 <p className="text-xs text-muted-foreground">
-                  {stats.notes} note{stats.notes > 1 ? "s" : ""} enregistrée{stats.notes > 1 ? "s" : ""}
+                  {f(t.settings.delNotesCount, { n: stats.notes })}
                 </p>
               </div>
               <Button
@@ -304,8 +339,9 @@ export default function SettingsContent() {
                 disabled={stats.notes === 0}
                 onClick={() => clearKeys(
                   ["ql-notes"],
-                  `Supprimer les ${stats.notes} notes ?`,
-                  "Notes supprimées."
+                  t.settings.delNotes,
+                  t.settings.confirmDelTitle,
+                  t.settings.toastNotesDel,
                 )}
                 className="shrink-0 text-muted-foreground hover:text-destructive"
               >
@@ -315,10 +351,8 @@ export default function SettingsContent() {
 
             <div className="flex items-center justify-between gap-3 p-3 rounded-lg bg-muted/40">
               <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium">Réinitialiser la progression</p>
-                <p className="text-xs text-muted-foreground">
-                  Oublier les pages et temps de lecture
-                </p>
+                <p className="text-sm font-medium">{t.settings.delProgress}</p>
+                <p className="text-xs text-muted-foreground">{t.settings.delProgressDesc}</p>
               </div>
               <Button
                 variant="ghost"
@@ -326,8 +360,9 @@ export default function SettingsContent() {
                 disabled={stats.docs === 0 && stats.readSec === 0}
                 onClick={() => clearKeys(
                   ["ql-progress-*", "ql-time-*"],
-                  "Réinitialiser toute la progression de lecture ?",
-                  "Progression réinitialisée."
+                  t.settings.delProgress,
+                  t.settings.delProgressDesc,
+                  t.settings.toastProgressReset,
                 )}
                 className="shrink-0 text-muted-foreground hover:text-destructive"
               >
@@ -338,32 +373,80 @@ export default function SettingsContent() {
           </CardContent>
         </Card>
 
+        {/* ─── Sauvegarde & transfert ─── */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <HugeiconsIcon icon={Upload01Icon} className="size-4 text-primary" />
+              {t.settings.backup}
+            </CardTitle>
+            <CardDescription>{t.settings.backupDesc}</CardDescription>
+          </CardHeader>
+          <Separator />
+          <CardContent className="pt-5 flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-3 p-3 rounded-lg bg-muted/40">
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium">{t.settings.exportData}</p>
+                <p className="text-xs text-muted-foreground">{t.settings.exportDataDesc}</p>
+              </div>
+              <Button variant="outline" size="sm" onClick={handleExport} className="shrink-0">
+                <HugeiconsIcon icon={Download01Icon} data-icon="inline-start" />
+                {t.settings.export}
+              </Button>
+            </div>
+            <div className="flex items-center justify-between gap-3 p-3 rounded-lg bg-muted/40">
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium">{t.settings.importData}</p>
+                <p className="text-xs text-muted-foreground">{t.settings.importDataDesc}</p>
+              </div>
+              <Button variant="outline" size="sm" onClick={() => fileInputRef.current?.click()} className="shrink-0">
+                <HugeiconsIcon icon={Upload01Icon} data-icon="inline-start" />
+                {t.settings.import}
+              </Button>
+            </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="application/json,.json"
+              onChange={handleImportFile}
+              className="hidden"
+            />
+            <p className="text-[11px] text-muted-foreground leading-relaxed pt-1">
+              💡 {t.settings.backupHint}
+            </p>
+          </CardContent>
+        </Card>
+
         {/* ─── Zone dangereuse ─── */}
         <Card className="border-destructive/30">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-destructive">
               <HugeiconsIcon icon={AlertCircleIcon} className="size-4" />
-              Zone dangereuse
+              {t.settings.danger}
             </CardTitle>
-            <CardDescription>
-              Action irréversible — toutes vos données seront perdues
-            </CardDescription>
+            <CardDescription>{t.settings.dangerDesc}</CardDescription>
           </CardHeader>
           <Separator />
           <CardContent className="pt-5">
             <Button
               variant="destructive"
               className="w-full sm:w-auto"
-              onClick={() => {
-                if (!confirm("Supprimer TOUTES vos données ? Marque-pages, notes, progression, paramètres. Action irréversible.")) return;
-                if (!confirm("Vraiment sûr ? Confirmez une dernière fois.")) return;
+              onClick={async () => {
+                const ok = await confirm({
+                  title: t.settings.confirmResetTitle,
+                  description: t.settings.confirmResetDesc,
+                  confirmText: t.settings.confirmResetBtn,
+                  cancelText: t.common.cancel,
+                  destructive: true,
+                });
+                if (!ok) return;
                 Object.keys(localStorage).filter(k => k.startsWith("ql-")).forEach(k => localStorage.removeItem(k));
-                alert("Toutes vos données ont été supprimées.");
-                window.location.reload();
+                toast.success(t.settings.toastAllDeleted);
+                setTimeout(() => window.location.reload(), 900);
               }}
             >
               <HugeiconsIcon icon={Delete01Icon} data-icon="inline-start" />
-              Réinitialiser toutes les données
+              {t.settings.resetAll}
             </Button>
           </CardContent>
         </Card>
@@ -371,7 +454,7 @@ export default function SettingsContent() {
         {/* ─── À propos ─── */}
         <Card>
           <CardHeader>
-            <CardTitle>À propos</CardTitle>
+            <CardTitle>{t.settings.about}</CardTitle>
           </CardHeader>
           <Separator />
           <CardContent className="pt-5">
@@ -383,9 +466,7 @@ export default function SettingsContent() {
               </div>
             </div>
             <p className="text-sm text-muted-foreground leading-relaxed">
-              Bibliothèque islamique numérique — Coran, sciences islamiques et apprentissage.
-              Toutes les données sont sauvegardées localement dans votre navigateur, aucune
-              information n&apos;est envoyée à un serveur externe.
+              {t.settings.aboutText}
             </p>
           </CardContent>
         </Card>

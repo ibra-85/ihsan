@@ -1,24 +1,13 @@
-import { notFound } from "next/navigation";
+"use client";
+
+import { useParams, notFound } from "next/navigation";
 import Link from "next/link";
 import { DOCUMENTS, getDocument, CATEGORIES } from "@/lib/documents";
+import { useI18n } from "@/components/i18n-provider";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { DocActions } from "./doc-actions";
-
-interface Props {
-  params: Promise<{ id: string }>;
-}
-
-const LANG_LABEL: Record<string, string> = {
-  ar: "Arabe",
-  fr: "Français",
-  ru: "Russe",
-  ce: "Tchétchène",
-  "ar-fr": "Arabe / Français",
-  "ar-ru": "Arabe / Russe",
-  "ar-ce": "Arabe / Tchétchène",
-};
 
 const LEVEL_CLASS: Record<string, string> = {
   "débutant":      "bg-success/15 text-success border-success/30",
@@ -26,8 +15,9 @@ const LEVEL_CLASS: Record<string, string> = {
   "avancé":        "bg-destructive/15 text-destructive border-destructive/30",
 };
 
-export default async function DocDetailPage({ params }: Props) {
-  const { id } = await params;
+export default function DocDetailPage() {
+  const { id } = useParams<{ id: string }>();
+  const { t, f, locale } = useI18n();
   const doc = getDocument(id);
   if (!doc) notFound();
 
@@ -54,13 +44,12 @@ export default async function DocDetailPage({ params }: Props) {
         href="/"
         className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors mb-6"
       >
-        ← Retour à la bibliothèque
+        <span className="rtl:rotate-180 inline-block">←</span> {t.doc.back}
       </Link>
 
       {/* Hero card */}
       <Card className="p-6 mb-6 overflow-hidden relative">
-        {/* Decoration */}
-        <div className="absolute top-0 right-0 w-32 h-32 bg-primary/5 rounded-full -translate-y-1/2 translate-x-1/2 blur-2xl pointer-events-none" />
+        <div className="absolute top-0 end-0 w-32 h-32 bg-primary/5 rounded-full -translate-y-1/2 translate-x-1/2 blur-2xl pointer-events-none" />
 
         <div className="relative flex items-start gap-4 mb-4">
           <div className="size-16 rounded-2xl bg-primary/10 flex items-center justify-center shrink-0">
@@ -68,9 +57,9 @@ export default async function DocDetailPage({ params }: Props) {
           </div>
           <div className="flex-1 min-w-0">
             <p className="text-xs font-semibold uppercase tracking-wider text-primary mb-1">
-              {category?.labelFr ?? doc.category}
+              {t.cat[doc.category]}
             </p>
-            <h1 className="text-2xl font-bold leading-tight">{doc.title}</h1>
+            <h1 className="text-2xl font-bold leading-tight">{doc.title[locale]}</h1>
             {doc.titleAr && (
               <p
                 dir="rtl"
@@ -85,22 +74,21 @@ export default async function DocDetailPage({ params }: Props) {
         </div>
 
         <p className="text-sm text-muted-foreground leading-relaxed mb-4 relative">
-          {doc.description}
+          {doc.description[locale]}
         </p>
 
-        {/* Badges meta */}
         <div className="flex items-center gap-2 flex-wrap relative">
           <Badge variant="outline" className="text-xs">
-            {LANG_LABEL[doc.language] ?? doc.language}
+            {t.lang[doc.language]}
           </Badge>
           {doc.level && (
             <Badge variant="outline" className={`text-xs ${levelClass}`}>
-              {doc.level}
+              {t.level[doc.level]}
             </Badge>
           )}
           {doc.pages && (
             <Badge variant="secondary" className="text-xs tabular-nums">
-              {doc.pages} pages
+              {f(t.doc.pagesCount, { n: doc.pages })}
             </Badge>
           )}
         </div>
@@ -110,7 +98,7 @@ export default async function DocDetailPage({ params }: Props) {
       <DocActions
         docId={doc.id}
         filename={doc.filename}
-        title={doc.title}
+        title={doc.title[locale]}
         totalPages={doc.pages}
       />
 
@@ -118,7 +106,7 @@ export default async function DocDetailPage({ params }: Props) {
       {doc.tags.length > 0 && (
         <section className="mb-8">
           <p className="text-xs text-muted-foreground uppercase tracking-wide font-semibold mb-3">
-            Mots-clés
+            {t.doc.tags}
           </p>
           <div className="flex flex-wrap gap-1.5">
             {doc.tags.map(tag => (
@@ -135,7 +123,7 @@ export default async function DocDetailPage({ params }: Props) {
         <section>
           <Separator className="mb-6" />
           <p className="text-xs text-muted-foreground uppercase tracking-wide font-semibold mb-3">
-            Documents similaires
+            {t.doc.similar}
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             {similar.map(d => {
@@ -149,11 +137,11 @@ export default async function DocDetailPage({ params }: Props) {
                   <div className="flex items-start justify-between gap-2">
                     <span className="text-2xl">{cat?.emoji ?? "📖"}</span>
                     <span className="text-[10px] text-muted-foreground uppercase tracking-wide">
-                      {LANG_LABEL[d.language] ?? d.language}
+                      {t.lang[d.language]}
                     </span>
                   </div>
                   <p className="text-sm font-semibold line-clamp-2 group-hover:text-primary transition-colors">
-                    {d.title}
+                    {d.title[locale]}
                   </p>
                   {d.titleAr && (
                     <p
