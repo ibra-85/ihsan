@@ -20,12 +20,14 @@ import {
   Database01Icon,
   AlertCircleIcon,
   Delete01Icon,
+  CloudDownloadIcon,
 } from "@hugeicons/core-free-icons";
 import {
   getSettings, saveSettings, getNotes, exportNotesAsTxt, getBookmarks,
   exportAllData, importAllData,
   type AppSettings,
 } from "@/lib/store";
+import { listCachedPdfs, clearPdfCache, type CachedPdfMeta } from "@/lib/pdf-cache";
 import type { Dictionary } from "@/lib/dictionaries";
 import { useConfirm } from "@/components/confirm-provider";
 import { Button } from "@/components/ui/button";
@@ -84,6 +86,20 @@ export default function SettingsContent() {
   const [accent, setAccent] = useState<AppSettings["accent"]>("green");
 
   const [stats, setStats] = useState({ bookmarks: 0, notes: 0, docs: 0, readSec: 0, bytes: 0 });
+  const [pdfCache, setPdfCache] = useState<CachedPdfMeta[]>([]);
+
+  const refreshPdfCache = () => {
+    listCachedPdfs().then((items) => setPdfCache(items));
+  };
+
+  useEffect(() => {
+    refreshPdfCache();
+    const onChange = () => refreshPdfCache();
+    window.addEventListener("ql-pdf-cache-change", onChange);
+    return () => window.removeEventListener("ql-pdf-cache-change", onChange);
+  }, []);
+
+  const pdfCacheBytes = pdfCache.reduce((s, p) => s + p.size, 0);
 
   const refreshStats = () => {
     if (typeof window === "undefined") return;
@@ -370,6 +386,68 @@ export default function SettingsContent() {
               </Button>
             </div>
 
+          </CardContent>
+        </Card>
+
+        {/* ─── Cache hors-ligne (PDFs) ─── */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <HugeiconsIcon icon={CloudDownloadIcon} className="size-4 text-primary" />
+              {t.settings.offlineCache}
+            </CardTitle>
+            <CardDescription>{t.settings.offlineCacheDesc}</CardDescription>
+          </CardHeader>
+          <Separator />
+          <CardContent className="pt-5 flex flex-col gap-3">
+            {pdfCache.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-2">
+                {t.settings.offlineCacheEmpty}
+              </p>
+            ) : (
+              <>
+                <div className="flex items-center justify-between gap-3 p-3 rounded-lg bg-muted/40">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium">
+                      {f(t.settings.offlineCacheSummary, {
+                        n: String(pdfCache.length),
+                        size: formatBytes(pdfCacheBytes),
+                      })}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {t.settings.offlineCacheHint}
+                    </p>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={async () => {
+                      const ok = await confirm({
+                        title: t.settings.confirmClearCacheTitle,
+                        description: t.settings.confirmClearCacheDesc,
+                        confirmText: t.common.delete,
+                        cancelText: t.common.cancel,
+                        destructive: true,
+                      });
+                      if (!ok) return;
+                      await clearPdfCache();
+                      toast.success(t.settings.toastPdfCacheCleared);
+                    }}
+                    className="shrink-0 text-muted-foreground hover:text-destructive"
+                  >
+                    <HugeiconsIcon icon={Delete01Icon} />
+                  </Button>
+                </div>
+                <ul className="text-xs text-muted-foreground space-y-1 ps-1">
+                  {pdfCache.map((p) => (
+                    <li key={p.docId} className="flex justify-between gap-3">
+                      <span className="truncate">{p.filename}</span>
+                      <span className="tabular-nums shrink-0">{formatBytes(p.size)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
           </CardContent>
         </Card>
 

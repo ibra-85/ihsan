@@ -20,10 +20,11 @@ import { LOCALES, LOCALE_NAMES } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { useEffect, useState } from "react";
 
+// TODO: réactiver l'entrée "Apprendre" + le streak quand la phase 12 sera complète
 const NAV: { href: string; key: "library" | "bookmarks" | "settings"; icon: IconSvgElement }[] = [
-  { href: "/",          key: "library",   icon: BookOpenTextIcon },
-  { href: "/bookmarks", key: "bookmarks", icon: BookBookmark01Icon },
-  { href: "/settings",  key: "settings",  icon: Setting06Icon },
+  { href: "/",           key: "library",   icon: BookOpenTextIcon },
+  { href: "/bookmarks",  key: "bookmarks", icon: BookBookmark01Icon },
+  { href: "/settings",   key: "settings",  icon: Setting06Icon },
 ];
 
 export function Navbar() {
@@ -31,7 +32,9 @@ export function Navbar() {
   const { resolvedTheme, setTheme } = useTheme();
   const { t, locale, setLocale } = useI18n();
   const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   return (
     <header className="sticky top-0 z-50 border-b bg-card">

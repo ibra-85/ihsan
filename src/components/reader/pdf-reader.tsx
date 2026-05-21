@@ -21,7 +21,6 @@ import {
   SidebarLeft01Icon,
   LayoutThreeRowIcon,
   File01Icon,
-  Search01Icon,
   Copy01Icon,
   CopyCheckIcon,
   More01Icon,
@@ -51,14 +50,13 @@ import { clearPage, drawnPages, getAnnotations, type DrawTool } from "@/lib/anno
 import { drawStroke, drawText } from "@/lib/draw-render";
 import { useI18n } from "@/components/i18n-provider";
 import { cn } from "@/lib/utils";
+import { getCachedPdf, setCachedPdf, downloadPdf } from "@/lib/pdf-cache";
 
 pdfjs.GlobalWorkerOptions.workerSrc =
   `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
 const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4, 5];
-const RENDER_WINDOW = 8;
-
-type SearchResult = { page: number; excerpt: string };
+const RENDER_WINDOW = 4;
 
 type PdfViewport = { width: number; height: number };
 type PdfPage = {
@@ -131,6 +129,29 @@ export function PdfReader({ doc }: { doc: DocType }) {
   const [showNotes, setShowNotes]     = useState(false);
   const [showThumbs, setShowThumbs]   = useState(false);
   const [continuous, setContinuous]   = useState(false);
+  // Plage de pages effectivement visibles dans le viewport (mode continu).
+  // Utilisé en union avec la fenêtre ±RENDER_WINDOW autour de currentPage
+  // → les pages visibles sont toujours rendues même quand le scroll est en
+  // avance sur la mise à jour de currentPage (fix : pages grises persistantes
+  // pendant un scroll rapide).
+  const [visibleRange, setVisibleRange] = useState<{ start: number; end: number }>({ start: 1, end: 0 });
+  // LRU des pages récemment rendues. Permet à une page de rester affichée
+  // quand on scrolle au-delà et qu'on revient — pas de re-rasterisation par
+  // react-pdf (qui peut prendre 100-300ms par page). Limité pour borner la
+  // mémoire (chaque canvas pèse ~5 Mo à scale=1).
+  const [recentPages, setRecentPages] = useState<number[]>([]);
+  const MAX_RECENT_PAGES = 12;
+  // Dimensions natives d'une page (lues sur la page 1 dès que le PDF est chargé).
+  // Sert à dimensionner les placeholders gris du mode continu pour que leur
+  // hauteur corresponde à celle des canvas réels — sans ça, quand une rangée
+  // de placeholders bascule en page rendue, leur hauteur change et fait
+  // dériver visuellement la position du scroll ("on se retrouve 20 pages plus bas").
+  const [pageSize, setPageSize] = useState<{ width: number; height: number } | null>(null);
+  // Dimensions native par page (certains PDFs ont des pages de tailles
+  // différentes — couverture, sommaire, etc.). Sans ce Map, le placeholder
+  // utiliserait la dimension de la page 1, et le canvas réel d'une page
+  // hétérogène serait plus haut → décalage cumulé pendant le scroll.
+  const [pageSizes, setPageSizes] = useState<Map<number, { width: number; height: number }>>(new Map());
   const [notes, setNotes]             = useState<Note[]>([]);
   const [newNote, setNewNote]         = useState("");
   const [loading, setLoading]         = useState(true);
@@ -138,13 +159,6 @@ export function PdfReader({ doc }: { doc: DocType }) {
   const [retryKey, setRetryKey]       = useState(0);
   const [progress, setProgress]       = useState<{ loaded: number; total: number } | null>(null);
   const retryCountRef                 = useRef(0);
-
-  /* ── Recherche texte ──────────────────────────────── */
-  const [showSearch, setShowSearch]       = useState(false);
-  const [searchQuery, setSearchQuery]     = useState("");
-  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
-  const [searching, setSearching]         = useState(false);
-  const searchInputRef                    = useRef<HTMLInputElement>(null);
 
   /* ── Copier lien ──────────────────────────────────── */
   const [copied, setCopied] = useState(false);
@@ -176,8 +190,10 @@ export function PdfReader({ doc }: { doc: DocType }) {
     return () => window.removeEventListener("ql-text-style", onStyle);
   }, []);
 
-  const containerRef = useRef<HTMLDivElement>(null);
-  const pdfCanvasRef = useRef<HTMLDivElement>(null);
+  const containerRef    = useRef<HTMLDivElement>(null);
+  const pdfCanvasRef    = useRef<HTMLDivElement>(null);
+  const pinchWrapperRef = useRef<HTMLDivElement>(null);
+  const lastFactorRef   = useRef(1);
   const pageRefs     = useRef<(HTMLDivElement | null)[]>([]);
   const lastSaveRef  = useRef<number>(Date.now());
   const pdfDocRef    = useRef<PdfProxy | null>(null);
@@ -194,7 +210,46 @@ export function PdfReader({ doc }: { doc: DocType }) {
     disableStream: false,
   }), []);
 
+  /* ── Cache PDF IndexedDB ──────────────────────────── */
+  // Source effective passée à <Document/> : { data: Uint8Array } si le PDF est en
+  // cache local, sinon l'URL CDN (streaming). useMemo + clé doc.id pour éviter
+  // tout rechargement intempestif.
+  const [cachedData, setCachedData] = useState<Uint8Array | null>(null);
+  const [cacheChecked, setCacheChecked] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setCacheChecked(false);
+    setCachedData(null);
+    getCachedPdf(doc.id).then((buf) => {
+      if (cancelled) return;
+      if (buf) setCachedData(new Uint8Array(buf));
+      setCacheChecked(true);
+    });
+    return () => { cancelled = true; };
+  }, [doc.id]);
+
+  // Téléchargement complet en arrière-plan pour remplir le cache après la
+  // première ouverture (uniquement si pas déjà en cache).
+  useEffect(() => {
+    if (!cacheChecked || cachedData) return;
+    if (numPages === 0) return; // attendre que le streaming ait au moins parsé le header
+    const controller = new AbortController();
+    downloadPdf(pdfUrl, undefined, controller.signal)
+      .then((buf) => setCachedPdf(doc.id, doc.filename, buf))
+      .catch(() => {/* hors-ligne ou abort : pas grave, on réessaiera */});
+    return () => controller.abort();
+  }, [cacheChecked, cachedData, numPages, doc.id, doc.filename, pdfUrl]);
+
+  // file= prop pour <Document/>. On enveloppe data dans un objet stable (useMemo).
+  const pdfFile = useMemo<string | { data: Uint8Array }>(() => {
+    if (cachedData) return { data: cachedData };
+    return pdfUrl;
+  }, [cachedData, pdfUrl]);
+
   // État partagé du PDF — évite de parser le fichier 2x pour la sidebar des vignettes
+  // pageSize est pré-rempli dans onLoadSuccess du <Document/> avant setLoading(false),
+  // donc dès que le user voit le contenu les placeholders ont la bonne hauteur.
   const [pdfProxy, setPdfProxy] = useState<PdfProxy | null>(null);
 
   /* ── Init : hash URL prioritaire sur localStorage ── */
@@ -258,6 +313,8 @@ export function PdfReader({ doc }: { doc: DocType }) {
   }, []);
 
   /* ── Pinch-to-zoom mobile (2 doigts) ──────────────── */
+  // Pendant le geste : CSS transform sur un wrapper (GPU, zéro re-render).
+  // Au touchend : setScale une seule fois → un seul re-rendu PDF.
   useEffect(() => {
     const el = pdfCanvasRef.current;
     if (!el) return;
@@ -269,12 +326,35 @@ export function PdfReader({ doc }: { doc: DocType }) {
     const dist = (t: TouchList) =>
       Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
 
+    const commitPinch = () => {
+      const wrapper = pinchWrapperRef.current;
+      if (wrapper) {
+        wrapper.style.transform = "";
+        wrapper.style.transformOrigin = "";
+        wrapper.style.willChange = "";
+      }
+      const next = Math.min(5, Math.max(0.25, Math.round(initialScale * lastFactorRef.current * 100) / 100));
+      setScale(next);
+      lastFactorRef.current = 1;
+      pinching = false;
+    };
+
     const onStart = (e: TouchEvent) => {
-      if (drawModeRef.current) return; // dessin actif → pas de pinch
+      if (drawModeRef.current) return;
       if (e.touches.length === 2) {
         pinching = true;
         initialDist = dist(e.touches);
         initialScale = scaleRef.current;
+        lastFactorRef.current = 1;
+        const wrapper = pinchWrapperRef.current;
+        if (wrapper) {
+          // Ancre le zoom sur le centre du pinch
+          const rect = wrapper.getBoundingClientRect();
+          const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+          const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+          wrapper.style.transformOrigin = `${midX - rect.left}px ${midY - rect.top}px`;
+          wrapper.style.willChange = "transform";
+        }
         e.preventDefault();
       }
     };
@@ -284,20 +364,25 @@ export function PdfReader({ doc }: { doc: DocType }) {
       if (!pinching || e.touches.length !== 2) return;
       e.preventDefault();
       const factor = dist(e.touches) / initialDist;
-      const next = Math.min(5, Math.max(0.25, Math.round(initialScale * factor * 100) / 100));
-      setScale(next);
+      lastFactorRef.current = factor;
+      const wrapper = pinchWrapperRef.current;
+      if (wrapper) {
+        // Clamp le scale visuel dans les bornes autorisées
+        const visual = Math.min(5 / initialScale, Math.max(0.25 / initialScale, factor));
+        wrapper.style.transform = `scale(${visual})`;
+      }
     };
 
-    const onEnd = () => { pinching = false; };
+    const onEnd = () => { if (pinching) commitPinch(); };
 
-    el.addEventListener("touchstart", onStart, { passive: false });
-    el.addEventListener("touchmove",  onMove,  { passive: false });
-    el.addEventListener("touchend",   onEnd);
+    el.addEventListener("touchstart",  onStart, { passive: false });
+    el.addEventListener("touchmove",   onMove,  { passive: false });
+    el.addEventListener("touchend",    onEnd);
     el.addEventListener("touchcancel", onEnd);
     return () => {
-      el.removeEventListener("touchstart", onStart);
-      el.removeEventListener("touchmove",  onMove);
-      el.removeEventListener("touchend",   onEnd);
+      el.removeEventListener("touchstart",  onStart);
+      el.removeEventListener("touchmove",   onMove);
+      el.removeEventListener("touchend",    onEnd);
       el.removeEventListener("touchcancel", onEnd);
     };
   }, []);
@@ -312,33 +397,92 @@ export function PdfReader({ doc }: { doc: DocType }) {
     if (!root) return;
 
     let rafId: number | null = null;
+    let stopTimer: number | null = null;
+    let lastY = root.scrollTop;
+    let lastT = performance.now();
 
-    const updateActive = () => {
+    // Seuil de scroll "rapide" en px/ms. Au-delà, on diffère la mise à jour
+    // de visibleRange à l'arrêt du scroll, sinon les setState successifs font
+    // re-rendre react-pdf à chaque frame → main thread saturé → scrollbar qui
+    // décroche pendant le drag, et pages grises persistantes après l'arrêt.
+    const FAST_THRESHOLD = 2.5;
+
+    const measure = () => {
       rafId = null;
       const rootRect = root.getBoundingClientRect();
       const refLine = rootRect.top + rootRect.height * 0.35;
+      const viewTop = rootRect.top;
+      const viewBottom = rootRect.bottom;
+      const margin = rootRect.height; // 1 viewport de marge en haut/bas
+
+      let active = -1;
+      let firstVis = -1;
+      let lastVis = -1;
       for (let i = 0; i < pageRefs.current.length; i++) {
         const el = pageRefs.current[i];
         if (!el) continue;
         const r = el.getBoundingClientRect();
-        if (r.top <= refLine && r.bottom >= refLine) {
-          setCurrentPage(i + 1);
-          return;
+        if (active === -1 && r.top <= refLine && r.bottom >= refLine) {
+          active = i + 1;
         }
+        if (r.bottom >= viewTop - margin && r.top <= viewBottom + margin) {
+          if (firstVis === -1) firstVis = i + 1;
+          lastVis = i + 1;
+        } else if (lastVis !== -1) {
+          // sorti de la zone visible : pas la peine de continuer
+          break;
+        }
+      }
+      if (active > 0) setCurrentPage(active);
+      if (firstVis > 0 && lastVis > 0) {
+        setVisibleRange(prev =>
+          prev.start === firstVis && prev.end === lastVis ? prev : { start: firstVis, end: lastVis },
+        );
+        // Touche le LRU : on déplace les pages visibles en fin de liste (= plus récentes)
+        const fv = firstVis, lv = lastVis;
+        setRecentPages(prev => {
+          const filtered = prev.filter(p => p < fv || p > lv);
+          const merged = filtered.concat(Array.from({ length: lv - fv + 1 }, (_, i) => fv + i));
+          return merged.length > MAX_RECENT_PAGES
+            ? merged.slice(merged.length - MAX_RECENT_PAGES)
+            : merged;
+        });
       }
     };
 
+    const scheduleMeasure = () => {
+      if (rafId === null) rafId = requestAnimationFrame(measure);
+    };
+
     const onScroll = () => {
-      if (rafId !== null) return;
-      rafId = requestAnimationFrame(updateActive);
+      const now = performance.now();
+      const dy = Math.abs(root.scrollTop - lastY);
+      const dt = now - lastT;
+      const velocity = dt > 0 ? dy / dt : 0;
+      lastY = root.scrollTop;
+      lastT = now;
+
+      if (velocity < FAST_THRESHOLD) {
+        // Scroll lent / normal : update à chaque rAF comme avant.
+        scheduleMeasure();
+      }
+      // Toujours programmer un update final à l'arrêt du scroll (≈120ms
+      // après le dernier événement). C'est ce qui rafraîchit visibleRange
+      // après un drag rapide de la scrollbar.
+      if (stopTimer !== null) clearTimeout(stopTimer);
+      stopTimer = window.setTimeout(() => {
+        stopTimer = null;
+        scheduleMeasure();
+      }, 120);
     };
 
     root.addEventListener("scroll", onScroll, { passive: true });
-    updateActive(); // détection initiale
+    measure(); // détection initiale
 
     return () => {
       root.removeEventListener("scroll", onScroll);
       if (rafId !== null) cancelAnimationFrame(rafId);
+      if (stopTimer !== null) clearTimeout(stopTimer);
     };
   }, [continuous, numPages]);
 
@@ -347,32 +491,6 @@ export function PdfReader({ doc }: { doc: DocType }) {
     const thumb = document.getElementById(`thumb-${currentPage}`);
     thumb?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [currentPage]);
-
-  /* ── Focus + Ctrl+F ──────────────────────────────── */
-  useEffect(() => {
-    if (showSearch) {
-      setTimeout(() => searchInputRef.current?.focus(), 50);
-    } else {
-      setSearchQuery("");
-      setSearchResults([]);
-    }
-  }, [showSearch]);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "f") {
-        e.preventDefault();
-        setShowSearch(v => {
-          if (!v) return true;
-          searchInputRef.current?.focus();
-          return true;
-        });
-      }
-      if (e.key === "Escape") setShowSearch(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
 
   /* ── Navigation ───────────────────────────────────── */
   const goTo = useCallback((page: number) => {
@@ -490,45 +608,19 @@ export function PdfReader({ doc }: { doc: DocType }) {
     });
   };
 
-  /* ── Recherche texte PDF ──────────────────────────── */
-  const searchInPdf = async () => {
-    const q = searchQuery.trim();
-    if (!q || !pdfDocRef.current) return;
-    setSearching(true);
-    setSearchResults([]);
-    const results: SearchResult[] = [];
-    const total = pdfDocRef.current.numPages;
-    for (let i = 1; i <= total; i++) {
-      try {
-        const page = await pdfDocRef.current.getPage(i);
-        const content = await page.getTextContent();
-        const text = content.items
-          .map(item => item.str ?? "")
-          .join(" ")
-          .replace(/\s+/g, " ")
-          .trim();
-        if (text.toLowerCase().includes(q.toLowerCase())) {
-          const idx = text.toLowerCase().indexOf(q.toLowerCase());
-          const start = Math.max(0, idx - 40);
-          const excerpt = (start > 0 ? "…" : "") +
-            text.slice(start, idx + q.length + 60).trim() +
-            (idx + q.length + 60 < text.length ? "…" : "");
-          results.push({ page: i, excerpt });
-          if (results.length >= 50) break;
-        }
-      } catch {
-        // Page sans couche texte — on passe
-      }
-    }
-    setSearchResults(results);
-    setSearching(false);
-  };
-
   const pageNotes = notes.filter(n => n.page === currentPage);
 
   /* ── Rendu page (mode continu) ────────────────────── */
   const renderContinuousPage = (pageNum: number) => {
-    const inWindow = Math.abs(pageNum - currentPage) <= RENDER_WINDOW;
+    // Une page est rendue si :
+    //  - elle est dans la fenêtre étroite autour de la page courante
+    //  - OU elle est dans le viewport courant (± 1 viewport de marge)
+    //  - OU elle est dans le LRU des pages récemment vues (évite la re-rasterisation
+    //    coûteuse de react-pdf quand on revient sur une page déjà visitée)
+    const inWindow =
+      Math.abs(pageNum - currentPage) <= RENDER_WINDOW ||
+      (pageNum >= visibleRange.start && pageNum <= visibleRange.end) ||
+      recentPages.includes(pageNum);
     return (
       <div
         key={pageNum}
@@ -547,7 +639,10 @@ export function PdfReader({ doc }: { doc: DocType }) {
               loading={
                 <div
                   className="bg-muted/30 rounded animate-pulse"
-                  style={{ width: `${Math.round(595 * scale)}px`, height: `${Math.round(842 * scale)}px` }}
+                  style={{
+                    width: `${(pageSizes.get(pageNum)?.width ?? pageSize?.width ?? 595) * scale}px`,
+                    height: `${(pageSizes.get(pageNum)?.height ?? pageSize?.height ?? 842) * scale}px`,
+                  }}
                 />
               }
             />
@@ -568,7 +663,10 @@ export function PdfReader({ doc }: { doc: DocType }) {
         ) : (
           <div
             className="bg-white/10 rounded"
-            style={{ width: `${Math.round(595 * scale)}px`, height: `${Math.round(842 * scale)}px` }}
+            style={{
+              width: `${(pageSizes.get(pageNum)?.width ?? pageSize?.width ?? 595) * scale}px`,
+              height: `${(pageSizes.get(pageNum)?.height ?? pageSize?.height ?? 842) * scale}px`,
+            }}
           />
         )}
       </div>
@@ -649,16 +747,6 @@ export function PdfReader({ doc }: { doc: DocType }) {
           </Button>
 
           <Separator orientation="vertical" className="h-6 mx-1.5 hidden sm:block" />
-
-          {/* Recherche — toujours visible */}
-          <Button
-            variant="ghost" size="icon-sm"
-            onClick={() => setShowSearch(v => !v)}
-            title={t.reader.searchTitle}
-            className={cn(showSearch ? "text-primary" : "text-muted-foreground")}
-          >
-            <HugeiconsIcon icon={Search01Icon} />
-          </Button>
 
           {/* Marque-page — toujours visible */}
           <Button
@@ -814,56 +902,6 @@ export function PdfReader({ doc }: { doc: DocType }) {
         </div>
       </div>
 
-      {/* ── Barre de recherche (Ctrl+F) ──────────────────── */}
-      {showSearch && (
-        <div className="border-b bg-muted/40 px-3 py-2 shrink-0 flex flex-col gap-2">
-          <div className="flex items-center gap-2">
-            <HugeiconsIcon icon={Search01Icon} className="size-4 text-primary shrink-0" />
-            <Input
-              ref={searchInputRef}
-              value={searchQuery}
-              onChange={e => { setSearchQuery(e.target.value); setSearchResults([]); }}
-              onKeyDown={e => { if (e.key === "Enter") searchInPdf(); if (e.key === "Escape") setShowSearch(false); }}
-              placeholder={t.reader.searchPlaceholder}
-              className="h-8 text-sm flex-1"
-            />
-            <Button size="sm" onClick={searchInPdf} disabled={!searchQuery.trim() || searching} className="shrink-0">
-              {searching
-                ? <span className="size-3.5 rounded-full border-2 border-primary-foreground border-t-transparent animate-spin inline-block" />
-                : t.reader.searchRun
-              }
-            </Button>
-            <Button variant="ghost" size="icon-sm" onClick={() => setShowSearch(false)} title={t.common.close}>
-              <HugeiconsIcon icon={Cancel01Icon} />
-            </Button>
-          </div>
-
-          {searchResults.length > 0 && (
-            <div className="flex items-center gap-2 overflow-x-auto">
-              <span className="text-xs text-muted-foreground shrink-0">
-                {f(t.reader.searchResults, { n: searchResults.length })}
-                {searchResults.length >= 50 ? ` ${t.reader.searchMax}` : ""} →
-              </span>
-              {searchResults.map(r => (
-                <button
-                  key={r.page}
-                  onClick={() => goTo(r.page)}
-                  title={r.excerpt}
-                  className="shrink-0 text-xs px-2.5 py-1 rounded-full bg-primary/10 hover:bg-primary/25 text-primary font-medium transition-colors"
-                >
-                  p.{r.page}
-                </button>
-              ))}
-            </div>
-          )}
-          {!searching && searchResults.length === 0 && searchQuery.trim() && (
-            <p className="text-xs text-muted-foreground">
-              {t.reader.searchNone}
-            </p>
-          )}
-        </div>
-      )}
-
       {/* ── Corps ──────────────────────────────────────── */}
       <div className="flex flex-1 overflow-hidden">
 
@@ -950,23 +988,45 @@ export function PdfReader({ doc }: { doc: DocType }) {
 
           {loadError && errorFallback}
 
-          {!loadError && (
+          {!loadError && cacheChecked && (
+            <div ref={pinchWrapperRef}>
             <PdfErrorBoundary fallback={errorFallback}>
               <Document
                 key={retryKey}
-                file={pdfUrl}
+                file={pdfFile}
                 options={pdfOptions}
                 onLoadProgress={({ loaded, total }) => {
                   if (total > 0) setProgress({ loaded, total });
                 }}
-                onLoadSuccess={(proxy) => {
+                onLoadSuccess={async (proxy) => {
                   const p = proxy as unknown as PdfProxy;
                   pdfDocRef.current = p;
+                  pageRefs.current = new Array(proxy.numPages).fill(null);
+                  // Clamp la page courante dans la plage valide du PDF chargé.
+                  setCurrentPage(prev => Math.max(1, Math.min(prev, proxy.numPages)));
+                  // Lire les dimensions de TOUTES les pages en parallèle avant
+                  // de retirer l'écran de chargement. Garantit que les
+                  // placeholders du mode continu ont exactement la hauteur du
+                  // canvas réel, ce qui évite tout layout shift cumulatif
+                  // pendant un drag rapide de la scrollbar.
+                  try {
+                    const sizes = await Promise.all(
+                      Array.from({ length: proxy.numPages }, (_, i) =>
+                        p.getPage(i + 1).then((page) => {
+                          const vp = page.getViewport({ scale: 1 });
+                          return { width: vp.width, height: vp.height };
+                        }),
+                      ),
+                    );
+                    const map = new Map<number, { width: number; height: number }>();
+                    sizes.forEach((s, i) => map.set(i + 1, s));
+                    setPageSizes(map);
+                    if (sizes[0]) setPageSize(sizes[0]);
+                  } catch { /* fallback aux dimensions par défaut */ }
                   setPdfProxy(p);
                   setNumPages(proxy.numPages);
                   setLoading(false);
                   setProgress(null);
-                  pageRefs.current = new Array(proxy.numPages).fill(null);
                 }}
                 onLoadError={(err) => {
                   setLoading(false);
@@ -1002,6 +1062,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
                 }
               </Document>
             </PdfErrorBoundary>
+            </div>
           )}
         </div>
 

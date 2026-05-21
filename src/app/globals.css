@@ -143,10 +143,23 @@
 .dark[data-accent="rose"]   { --primary: oklch(0.71 0.198 18.469); --primary-foreground: oklch(0.145 0 0); }
 
 /* Scrollbar */
-::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar { width: 12px; height: 12px; }
 ::-webkit-scrollbar-track { background: var(--muted); }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 6px;
+  border: 3px solid var(--muted); /* padding visuel autour du pouce */
+}
 ::-webkit-scrollbar-thumb:hover { background: var(--muted-foreground); }
+::-webkit-scrollbar-corner { background: var(--muted); }
+/* Firefox */
+* { scrollbar-color: var(--border) var(--muted); scrollbar-width: auto; }
+
+/* react-pdf : éviter le rectangle blanc placeholder avant que le canvas
+   d'une page ne soit peint (visible en mode sombre). Le canvas garde son
+   fond blanc une fois rendu — seul le wrapper devient transparent. */
+.react-pdf__Page { background: transparent !important; }
+.react-pdf__message { display: none; }
 
 @layer base {
   * {
