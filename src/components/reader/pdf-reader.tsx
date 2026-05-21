@@ -187,11 +187,17 @@ export function PdfReader({ doc }: { doc: DocType }) {
     return () => window.removeEventListener("ql-text-style", onStyle);
   }, []);
 
-  const containerRef = useRef<HTMLDivElement>(null);
-  const pdfCanvasRef = useRef<HTMLDivElement>(null);
-  const pageRefs    = useRef<(HTMLDivElement | null)[]>([]);
-  const lastSaveRef = useRef<number>(Date.now());
-  const pdfDocRef   = useRef<PdfProxy | null>(null);
+  const containerRef    = useRef<HTMLDivElement>(null);
+  const pdfCanvasRef    = useRef<HTMLDivElement>(null);
+  const pinchWrapperRef = useRef<HTMLDivElement>(null);
+  const lastFactorRef   = useRef(1);
+  const pageRefs     = useRef<(HTMLDivElement | null)[]>([]);
+  const lastSaveRef  = useRef<number>(Date.now());
+  const pdfDocRef    = useRef<PdfProxy | null>(null);
+  const scaleRef     = useRef(scale);
+  useEffect(() => { scaleRef.current = scale; }, [scale]);
+  const drawModeRef  = useRef(drawMode);
+  useEffect(() => { drawModeRef.current = drawMode; }, [drawMode]);
 
   const pdfUrl = getDocumentUrl(doc.filename);
 
@@ -305,9 +311,79 @@ export function PdfReader({ doc }: { doc: DocType }) {
     }
   }, []);
 
-  // Note : le pinch-to-zoom est délégué au navigateur (zoom natif), ce qui
-  // permet le pan dans l'image zoomée. Les boutons +/- de la toolbar font
-  // un vrai zoom net via re-rasterisation react-pdf.
+  /* ── Pinch-to-zoom mobile (2 doigts) ──────────────── */
+  // Pendant le geste : CSS transform sur un wrapper (GPU, zéro re-render).
+  // Au touchend : setScale une seule fois → un seul re-rendu PDF net.
+  useEffect(() => {
+    const el = pdfCanvasRef.current;
+    if (!el) return;
+
+    let pinching = false;
+    let initialDist = 0;
+    let initialScale = 1;
+
+    const dist = (t: TouchList) =>
+      Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+
+    const commitPinch = () => {
+      const wrapper = pinchWrapperRef.current;
+      if (wrapper) {
+        wrapper.style.transform = "";
+        wrapper.style.transformOrigin = "";
+        wrapper.style.willChange = "";
+      }
+      const next = Math.min(5, Math.max(0.25, Math.round(initialScale * lastFactorRef.current * 100) / 100));
+      setScale(next);
+      lastFactorRef.current = 1;
+      pinching = false;
+    };
+
+    const onStart = (e: TouchEvent) => {
+      if (drawModeRef.current) return;
+      if (e.touches.length === 2) {
+        pinching = true;
+        initialDist = dist(e.touches);
+        initialScale = scaleRef.current;
+        lastFactorRef.current = 1;
+        const wrapper = pinchWrapperRef.current;
+        if (wrapper) {
+          // Ancre le zoom sur le centre du pinch
+          const rect = wrapper.getBoundingClientRect();
+          const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+          const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+          wrapper.style.transformOrigin = `${midX - rect.left}px ${midY - rect.top}px`;
+          wrapper.style.willChange = "transform";
+        }
+        e.preventDefault();
+      }
+    };
+
+    const onMove = (e: TouchEvent) => {
+      if (drawModeRef.current) return;
+      if (!pinching || e.touches.length !== 2) return;
+      e.preventDefault();
+      const factor = dist(e.touches) / initialDist;
+      lastFactorRef.current = factor;
+      const wrapper = pinchWrapperRef.current;
+      if (wrapper) {
+        const visual = Math.min(5 / initialScale, Math.max(0.25 / initialScale, factor));
+        wrapper.style.transform = `scale(${visual})`;
+      }
+    };
+
+    const onEnd = () => { if (pinching) commitPinch(); };
+
+    el.addEventListener("touchstart",  onStart, { passive: false });
+    el.addEventListener("touchmove",   onMove,  { passive: false });
+    el.addEventListener("touchend",    onEnd);
+    el.addEventListener("touchcancel", onEnd);
+    return () => {
+      el.removeEventListener("touchstart",  onStart);
+      el.removeEventListener("touchmove",   onMove);
+      el.removeEventListener("touchend",    onEnd);
+      el.removeEventListener("touchcancel", onEnd);
+    };
+  }, []);
 
   /* ── Détection page courante (mode continu) ───────── */
   // Une ligne de référence fixe à 35% du haut du viewport. La page qui
@@ -874,8 +950,15 @@ export function PdfReader({ doc }: { doc: DocType }) {
         {/* Zone PDF principale */}
         <div
           ref={pdfCanvasRef}
-          className="flex-1 overflow-auto flex flex-col items-center bg-neutral-300 dark:bg-neutral-900"
-          style={{ padding: continuous ? "1.5rem 1.5rem 0" : "1.5rem" }}
+          className="flex-1 overflow-auto flex flex-col bg-neutral-300 dark:bg-neutral-900"
+          // alignItems: "safe center" — centre le contenu tant qu'il rentre,
+          // mais bascule en "start" quand il déborde, ce qui permet de
+          // scroller vers la gauche pour voir le débordement (sans ça, le
+          // contenu débordant à gauche du centre est inaccessible).
+          style={{
+            padding: continuous ? "1.5rem 1.5rem 0" : "1.5rem",
+            alignItems: "safe center",
+          }}
         >
           {loading && (
             <div className="flex-1 w-full flex items-center justify-center">
@@ -911,6 +994,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
           {loadError && errorFallback}
 
           {!loadError && cacheChecked && (
+            <div ref={pinchWrapperRef}>
             <PdfErrorBoundary fallback={errorFallback}>
               <Document
                 key={retryKey}
@@ -983,6 +1067,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
                 }
               </Document>
             </PdfErrorBoundary>
+            </div>
           )}
         </div>
 
