@@ -145,6 +145,11 @@ export const ru: Dictionary = {
     confirmImportTitle: "Импортировать резервную копию",
     confirmImportDesc: "Данные из файла будут объединены с текущими (существующие записи будут перезаписаны). Продолжить?",
   },
+  pwa: {
+    updateTitle: "Доступна новая версия",
+    updateDescription: "Перезагрузите, чтобы применить обновления.",
+    updateReload: "Перезагрузить",
+  },
   reader: {
     pages: "стр.",
     loading: "Загрузка документа…",

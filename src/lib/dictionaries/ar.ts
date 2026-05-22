@@ -145,6 +145,11 @@ export const ar: Dictionary = {
     confirmImportTitle: "استيراد نسخة احتياطية",
     confirmImportDesc: "سيتم دمج بيانات الملف مع بياناتك الحالية (ستُستبدَل الإدخالات الموجودة). هل تريد المتابعة؟",
   },
+  pwa: {
+    updateTitle: "إصدار جديد متوفّر",
+    updateDescription: "أعد التحميل لتطبيق آخر التحديثات.",
+    updateReload: "إعادة التحميل",
+  },
   reader: {
     pages: "صفحات",
     loading: "جارٍ تحميل الوثيقة…",

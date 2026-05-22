@@ -52,9 +52,9 @@ export default function RootLayout({
               <main className="flex-1">{children}</main>
             </ConfirmProvider>
             <SonnerToaster />
+            <PwaRegister />
           </LanguageProvider>
         </ThemeProvider>
-        <PwaRegister />
       </body>
     </html>
   );

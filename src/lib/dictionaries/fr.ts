@@ -143,6 +143,11 @@ export const fr = {
     confirmImportTitle: "Importer une sauvegarde",
     confirmImportDesc: "Les données du fichier seront fusionnées avec vos données actuelles (les entrées existantes seront écrasées). Continuer ?",
   },
+  pwa: {
+    updateTitle: "Nouvelle version disponible",
+    updateDescription: "Rechargez pour appliquer les dernières mises à jour.",
+    updateReload: "Recharger",
+  },
   reader: {
     pages: "pages",
     loading: "Chargement du document…",

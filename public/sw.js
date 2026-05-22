@@ -4,13 +4,21 @@
  *  - App shell (JS/CSS/HTML) : Cache First (mise à jour en arrière-plan)
  *  - PDFs                    : Cache on demand (mis en cache à la première visite)
  *  - API / données externes  : Network First
+ *
+ * Versionning : à chaque déploiement, le client enregistre /sw.js?v=BUILD_ID
+ * où BUILD_ID est le SHA du commit (Vercel) ou un timestamp (local). Le
+ * navigateur détecte un changement d'URL et installe un nouveau SW. Les noms
+ * de caches d'app/font incluent ce BUILD_ID, donc l'ancien JS Next.js est
+ * purgé à l'activation. Le cache PDF reste constant (ihsan-pdf-v2) pour
+ * préserver les téléchargements de l'utilisateur entre versions.
  */
 
-const CACHE_APP   = "ihsan-app-v1";
-const CACHE_PDF   = "ihsan-pdf-v2";
-const CACHE_FONT  = "ihsan-fonts-v1";
+const VERSION = new URL(self.location.href).searchParams.get("v") || "dev";
+const CACHE_APP  = `ihsan-app-${VERSION}`;
+const CACHE_FONT = `ihsan-fonts-${VERSION}`;
+const CACHE_PDF  = "ihsan-pdf-v2";
 
-const CDN_HOST    = "cdn.ihsan-coran.fr";
+const CDN_HOST   = "cdn.ihsan-coran.fr";
 
 const APP_SHELL = [
   "/",
@@ -34,12 +42,20 @@ self.addEventListener("activate", event => {
     caches.keys().then(keys =>
       Promise.all(
         keys
-          .filter(k => ![CACHE_APP, CACHE_PDF, CACHE_FONT].includes(k))
+          // Purge tous les anciens caches d'app/font (versions précédentes).
+          // Garde le cache PDF (constant entre versions) et les caches courants.
+          .filter(k => k !== CACHE_APP && k !== CACHE_FONT && k !== CACHE_PDF)
           .map(k => caches.delete(k))
       )
     )
   );
   self.clients.claim();
+});
+
+// Permet au client de demander un skipWaiting (quand l'utilisateur clique
+// sur "Recharger pour mettre à jour" — cf. pwa-register.tsx).
+self.addEventListener("message", event => {
+  if (event.data === "SKIP_WAITING") self.skipWaiting();
 });
 
 /* ── Fetch ─────────────────────────────────────── */

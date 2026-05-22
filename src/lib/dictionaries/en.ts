@@ -145,6 +145,11 @@ export const en: Dictionary = {
     confirmImportTitle: "Import a backup",
     confirmImportDesc: "The file data will be merged with your current data (existing entries will be overwritten). Continue?",
   },
+  pwa: {
+    updateTitle: "A new version is available",
+    updateDescription: "Reload to apply the latest updates.",
+    updateReload: "Reload",
+  },
   reader: {
     pages: "pages",
     loading: "Loading document…",
