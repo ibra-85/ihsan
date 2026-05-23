@@ -5,6 +5,7 @@ export const ar: Dictionary = {
   common: {
     search: "بحث",
     cancel: "إلغاء",
+    back: "رجوع",
     confirm: "تأكيد",
     delete: "حذف",
     close: "إغلاق",

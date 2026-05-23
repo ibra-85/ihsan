@@ -3,6 +3,7 @@ export const fr = {
   common: {
     search: "Rechercher",
     cancel: "Annuler",
+    back: "Retour",
     confirm: "Confirmer",
     delete: "Supprimer",
     close: "Fermer",

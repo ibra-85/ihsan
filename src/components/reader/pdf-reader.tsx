@@ -59,10 +59,11 @@ const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4, 5];
 const RENDER_WINDOW = 4;
 
 type PdfViewport = { width: number; height: number };
+type PdfRenderTask = { promise: Promise<void>; cancel?: () => void };
 type PdfPage = {
   getTextContent: () => Promise<{ items: Array<{ str?: string }> }>;
   getViewport: (opts: { scale: number }) => PdfViewport;
-  render: (opts: { canvasContext: CanvasRenderingContext2D; viewport: PdfViewport }) => { promise: Promise<void> };
+  render: (opts: { canvasContext: CanvasRenderingContext2D; viewport: PdfViewport }) => PdfRenderTask;
 };
 type PdfProxy = {
   numPages: number;
@@ -205,7 +206,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
   // react-pdf (qui peut prendre 100-300ms par page). Limité pour borner la
   // mémoire (chaque canvas pèse ~5 Mo à scale=1).
   const [recentPages, setRecentPages] = useState<number[]>([]);
-  const MAX_RECENT_PAGES = 25;
+  const MAX_RECENT_PAGES = 10;
   // Dimensions natives d'une page (lues sur la page 1 dès que le PDF est chargé).
   // Sert à dimensionner les placeholders gris du mode continu pour que leur
   // hauteur corresponde à celle des canvas réels — sans ça, quand une rangée
@@ -269,6 +270,23 @@ export function PdfReader({ doc }: { doc: DocType }) {
   const pdfDocRef    = useRef<PdfProxy | null>(null);
   const scaleRef     = useRef(scale);
   useEffect(() => { scaleRef.current = scale; }, [scale]);
+
+  // Au changement de scale (zoom +/-, pinch, molette Ctrl) :
+  //  1. Pause le bg-render → libère pdf.js pour les rendus interactifs.
+  //  2. Vide le LRU → seules les pages strictement visibles re-rasterisent
+  //     (au lieu des 10+ pages du LRU). Évite l'attente de 10s d'avant.
+  const firstScaleSyncRef = useRef(true);
+  useEffect(() => {
+    if (firstScaleSyncRef.current) {
+      firstScaleSyncRef.current = false;
+      return; // évite le déclenchement au mount initial
+    }
+    pauseBgRender(2500);
+    setRecentPages([]);
+    // eslint-disable-next-line no-console
+    console.log(`[pdf] scale changed to ${scale}, cleared LRU, paused bg-render 2.5s`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scale]);
   const drawModeRef  = useRef(drawMode);
   useEffect(() => { drawModeRef.current = drawMode; }, [drawMode]);
 
@@ -325,28 +343,41 @@ export function PdfReader({ doc }: { doc: DocType }) {
   const [pdfProxy, setPdfProxy] = useState<PdfProxy | null>(null);
 
   /* ── Pré-rendu en arrière-plan (approche Chrome PDF viewer) ──────
-   * Une fois le PDF chargé, on rend silencieusement chaque page en JPEG via
-   * pdf.js dans un canvas offscreen, en utilisant `requestIdleCallback` pour
-   * ne s'exécuter QUE quand le CPU est libre. Résultat : après quelques
-   * secondes en background, toutes les pages ont une image cachée → un scroll
-   * rapide affiche `<img>` instantané pour chaque page traversée. */
+   * Rend silencieusement chaque page en JPEG via pdf.js dans un canvas
+   * offscreen, en utilisant `requestIdleCallback`. Crucial : on PAUSE et
+   * ANNULE le rendu en cours dès que l'utilisateur interagit (scroll, zoom),
+   * sinon pdf.js (qui sérialize) bloque les rendus interactifs des `<Page>`
+   * visibles → impression de lenteur sur les pages visitées. */
+  const bgPausedRef = useRef(false);
+  const bgCurrentTaskRef = useRef<PdfRenderTask | null>(null);
+
+  const pauseBgRender = useCallback((durationMs = 1500) => {
+    bgPausedRef.current = true;
+    // Annule le rendu en cours pour libérer pdf.js immédiatement.
+    try { bgCurrentTaskRef.current?.cancel?.(); } catch { /* ignore */ }
+    bgCurrentTaskRef.current = null;
+    window.setTimeout(() => { bgPausedRef.current = false; }, durationMs);
+  }, []);
+
   useEffect(() => {
     if (!pdfProxy) return;
     let cancelled = false;
 
     const renderPageToCache = async (pageNum: number) => {
-      if (cancelled || pageImagesRef.current.has(pageNum)) return;
+      if (cancelled || bgPausedRef.current || pageImagesRef.current.has(pageNum)) return;
       try {
         const page = await pdfProxy.getPage(pageNum);
-        if (cancelled) return;
-        // scale 1.2 = bon compromis netteté / taille (ce sera juste un placeholder).
+        if (cancelled || bgPausedRef.current) return;
         const vp = page.getViewport({ scale: 1.2 });
         const canvas = document.createElement("canvas");
         canvas.width = Math.round(vp.width);
         canvas.height = Math.round(vp.height);
         const ctx = canvas.getContext("2d");
         if (!ctx) return;
-        await page.render({ canvasContext: ctx, viewport: vp }).promise;
+        const task = page.render({ canvasContext: ctx, viewport: vp });
+        bgCurrentTaskRef.current = task;
+        await task.promise;
+        bgCurrentTaskRef.current = null;
         if (cancelled) return;
         const dataUrl = canvas.toDataURL("image/jpeg", 0.55);
         pageImagesRef.current.set(pageNum, dataUrl);
@@ -354,19 +385,18 @@ export function PdfReader({ doc }: { doc: DocType }) {
         console.log(`[pdf] bg-rendered page ${pageNum} (${Math.round(dataUrl.length / 1024)} kB, total ${pageImagesRef.current.size}/${pdfProxy.numPages})`);
         setImageCacheTick(t => t + 1);
       } catch (err) {
-        console.warn(`[pdf] bg-render failed for page ${pageNum}:`, err);
+        // RenderTask cancel rejette avec une "RenderingCancelledException" — ignorer.
+        const name = (err as { name?: string } | null)?.name;
+        if (name !== "RenderingCancelledException") {
+          console.warn(`[pdf] bg-render failed for page ${pageNum}:`, err);
+        }
       }
     };
 
-    // Construit l'ordre de pré-rendu : on commence par le centre, puis on
-    // s'étend vers les bords. Plus probable que l'utilisateur soit autour
-    // du milieu plutôt qu'aux extrémités.
     const buildQueue = (): number[] => {
       const total = pdfProxy.numPages;
       const queue: number[] = [];
-      // priorité 1 : pages 1 à 5 (l'utilisateur commence souvent ici)
       for (let i = 1; i <= Math.min(5, total); i++) queue.push(i);
-      // priorité 2 : depuis currentPage en spirale
       const center = Math.max(1, Math.min(currentPage, total));
       let offset = 1;
       while (queue.length < total) {
@@ -377,7 +407,6 @@ export function PdfReader({ doc }: { doc: DocType }) {
         offset++;
         if (offset > total) break;
       }
-      // priorité 3 : reste (au cas où, garantit de couvrir tout)
       for (let i = 1; i <= total; i++) if (!queue.includes(i)) queue.push(i);
       return queue;
     };
@@ -385,17 +414,21 @@ export function PdfReader({ doc }: { doc: DocType }) {
     const queue = buildQueue();
     let idx = 0;
 
-    // requestIdleCallback peut ne pas exister (Safari < 16) → fallback setTimeout.
     type IdleCb = (cb: () => void) => number;
     const schedule: IdleCb = (cb) => {
       if (typeof window.requestIdleCallback === "function") {
-        return window.requestIdleCallback(() => cb(), { timeout: 2000 });
+        return window.requestIdleCallback(() => cb(), { timeout: 3000 });
       }
       return window.setTimeout(cb, 200);
     };
 
     const runNext = () => {
       if (cancelled || idx >= queue.length) return;
+      // Pause active → on attend et on revérifie.
+      if (bgPausedRef.current) {
+        window.setTimeout(runNext, 500);
+        return;
+      }
       const pageNum = queue[idx++];
       schedule(async () => {
         await renderPageToCache(pageNum);
@@ -403,13 +436,13 @@ export function PdfReader({ doc }: { doc: DocType }) {
       });
     };
 
-    // Démarre après un court délai pour laisser la première rasterisation
-    // visuelle se faire en priorité (UX au load).
     const startTimer = window.setTimeout(runNext, 800);
 
     return () => {
       cancelled = true;
       window.clearTimeout(startTimer);
+      try { bgCurrentTaskRef.current?.cancel?.(); } catch { /* ignore */ }
+      bgCurrentTaskRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pdfProxy]);
@@ -618,6 +651,10 @@ export function PdfReader({ doc }: { doc: DocType }) {
 
     let scrollLogCount = 0;
     const onScroll = () => {
+      // Met en pause le bg-render pendant 1.5s après chaque scroll : libère
+      // pdf.js pour les rendus interactifs des `<Page>` visibles.
+      pauseBgRender(1500);
+
       const now = performance.now();
       const dy = Math.abs(root.scrollTop - lastY);
       const dt = now - lastT;

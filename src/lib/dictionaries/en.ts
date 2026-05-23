@@ -5,6 +5,7 @@ export const en: Dictionary = {
   common: {
     search: "Search",
     cancel: "Cancel",
+    back: "Back",
     confirm: "Confirm",
     delete: "Delete",
     close: "Close",

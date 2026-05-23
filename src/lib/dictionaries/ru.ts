@@ -5,6 +5,7 @@ export const ru: Dictionary = {
   common: {
     search: "Поиск",
     cancel: "Отмена",
+    back: "Назад",
     confirm: "Подтвердить",
     delete: "Удалить",
     close: "Закрыть",
