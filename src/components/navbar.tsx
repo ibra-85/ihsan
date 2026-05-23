@@ -10,26 +10,43 @@ import {
   Moon01Icon,
   Sun01Icon,
   Globe02Icon,
-  Tick01Icon,
+  Logout01Icon,
+  Menu01Icon,
+  ComputerIcon,
+  HandsClappingIcon,
 } from "@hugeicons/core-free-icons";
 import { useTheme } from "@/components/theme-provider";
 import { useI18n } from "@/components/i18n-provider";
 import { Button } from "@/components/ui/button";
-import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
-import { LOCALES, LOCALE_NAMES } from "@/lib/i18n";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubTrigger,
+  DropdownMenuSubContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuPortal,
+} from "@/components/ui/dropdown-menu";
+import { LOCALES, LOCALE_NAMES, type Locale } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { useEffect, useState } from "react";
 
 // TODO: réactiver l'entrée "Apprendre" + le streak quand la phase 12 sera complète
-const NAV: { href: string; key: "library" | "bookmarks" | "settings"; icon: IconSvgElement }[] = [
+const NAV: { href: string; key: "library" | "bookmarks" | "azkar" | "settings"; icon: IconSvgElement }[] = [
   { href: "/",           key: "library",   icon: BookOpenTextIcon },
+  { href: "/azkar",      key: "azkar",     icon: HandsClappingIcon },
   { href: "/bookmarks",  key: "bookmarks", icon: BookBookmark01Icon },
   { href: "/settings",   key: "settings",  icon: Setting06Icon },
 ];
 
 export function Navbar() {
   const pathname = usePathname();
-  const { resolvedTheme, setTheme } = useTheme();
+  const { theme, setTheme } = useTheme();
   const { t, locale, setLocale } = useI18n();
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
@@ -66,44 +83,84 @@ export function Navbar() {
         </nav>
 
         <div className="flex items-center gap-1 shrink-0">
-          {/* Sélecteur de langue */}
-          <Popover>
-            <PopoverTrigger asChild>
-              <Button variant="ghost" size="icon-sm" title={t.settings.language} className="text-muted-foreground">
-                <HugeiconsIcon icon={Globe02Icon} />
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon-sm" title={t.nav.menu} className="text-muted-foreground">
+                <HugeiconsIcon icon={Menu01Icon} />
               </Button>
-            </PopoverTrigger>
-            <PopoverContent align="end" className="w-44 p-1">
-              {LOCALES.map(l => (
-                <button
-                  key={l}
-                  onClick={() => setLocale(l)}
-                  className={cn(
-                    "flex items-center justify-between w-full px-2 py-1.5 rounded-md text-sm transition-colors",
-                    locale === l ? "bg-primary/10 text-primary font-medium" : "hover:bg-muted"
-                  )}
-                >
-                  {LOCALE_NAMES[l]}
-                  {locale === l && <HugeiconsIcon icon={Tick01Icon} className="size-4" />}
-                </button>
-              ))}
-            </PopoverContent>
-          </Popover>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
 
-          {/* Thème */}
-          {mounted && (
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
-              title={resolvedTheme === "dark" ? t.nav.lightMode : t.nav.darkMode}
-            >
-              {resolvedTheme === "dark"
-                ? <HugeiconsIcon icon={Sun01Icon} />
-                : <HugeiconsIcon icon={Moon01Icon} />
-              }
-            </Button>
-          )}
+              {/* — Langue (sous-menu) — */}
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger>
+                  <HugeiconsIcon icon={Globe02Icon} className="size-4 text-muted-foreground" />
+                  <span className="flex-1">{t.settings.language}</span>
+                  <span className="text-xs text-muted-foreground">{LOCALE_NAMES[locale]}</span>
+                </DropdownMenuSubTrigger>
+                <DropdownMenuPortal>
+                  <DropdownMenuSubContent>
+                    <DropdownMenuRadioGroup value={locale} onValueChange={(v) => setLocale(v as Locale)}>
+                      {LOCALES.map((l) => (
+                        <DropdownMenuRadioItem key={l} value={l}>
+                          {LOCALE_NAMES[l]}
+                        </DropdownMenuRadioItem>
+                      ))}
+                    </DropdownMenuRadioGroup>
+                  </DropdownMenuSubContent>
+                </DropdownMenuPortal>
+              </DropdownMenuSub>
+
+              {/* — Thème (sous-menu) — */}
+              {mounted && (
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger>
+                    <HugeiconsIcon
+                      icon={theme === "dark" ? Moon01Icon : theme === "light" ? Sun01Icon : ComputerIcon}
+                      className="size-4 text-muted-foreground"
+                    />
+                    <span className="flex-1">{t.settings.theme}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {theme === "light" ? t.settings.themeLight : theme === "dark" ? t.settings.themeDark : t.settings.themeSystem}
+                    </span>
+                  </DropdownMenuSubTrigger>
+                  <DropdownMenuPortal>
+                    <DropdownMenuSubContent>
+                      <DropdownMenuRadioGroup value={theme} onValueChange={(v) => setTheme(v as "light" | "dark" | "system")}>
+                        <DropdownMenuRadioItem value="light">
+                          <HugeiconsIcon icon={Sun01Icon} className="size-4" />
+                          {t.settings.themeLight}
+                        </DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem value="dark">
+                          <HugeiconsIcon icon={Moon01Icon} className="size-4" />
+                          {t.settings.themeDark}
+                        </DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem value="system">
+                          <HugeiconsIcon icon={ComputerIcon} className="size-4" />
+                          {t.settings.themeSystem}
+                        </DropdownMenuRadioItem>
+                      </DropdownMenuRadioGroup>
+                    </DropdownMenuSubContent>
+                  </DropdownMenuPortal>
+                </DropdownMenuSub>
+              )}
+
+              <DropdownMenuSeparator />
+
+              {/* — Déconnexion — */}
+              <DropdownMenuItem
+                destructive
+                onSelect={async () => {
+                  await fetch("/api/logout", { method: "POST" });
+                  window.location.href = "/login";
+                }}
+              >
+                <HugeiconsIcon icon={Logout01Icon} className="size-4" />
+                {t.login.logout}
+              </DropdownMenuItem>
+
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
     </header>

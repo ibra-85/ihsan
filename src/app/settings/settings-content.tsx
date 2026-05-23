@@ -21,6 +21,8 @@ import {
   AlertCircleIcon,
   Delete01Icon,
   CloudDownloadIcon,
+  Logout01Icon,
+  UserIcon,
 } from "@hugeicons/core-free-icons";
 import {
   getSettings, saveSettings, getNotes, exportNotesAsTxt, getBookmarks,
@@ -492,6 +494,31 @@ export default function SettingsContent() {
             <p className="text-[11px] text-muted-foreground leading-relaxed pt-1">
               💡 {t.settings.backupHint}
             </p>
+          </CardContent>
+        </Card>
+
+        {/* ─── Compte ─── */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <HugeiconsIcon icon={UserIcon} className="size-4 text-primary" />
+              {t.login.accountTitle}
+            </CardTitle>
+            <CardDescription>{t.login.accountDesc}</CardDescription>
+          </CardHeader>
+          <Separator />
+          <CardContent className="pt-5">
+            <Button
+              variant="outline"
+              onClick={async () => {
+                await fetch("/api/logout", { method: "POST" });
+                window.location.href = "/login";
+              }}
+              className="w-full sm:w-auto"
+            >
+              <HugeiconsIcon icon={Logout01Icon} data-icon="inline-start" />
+              {t.login.logout}
+            </Button>
           </CardContent>
         </Card>
 

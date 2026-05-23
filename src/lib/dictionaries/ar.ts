@@ -14,11 +14,13 @@ export const ar: Dictionary = {
   },
   nav: {
     library: "المكتبة",
+    azkar: "الأذكار",
     bookmarks: "العلامات المرجعية",
     settings: "الإعدادات",
     learn: "تعلّم",
     lightMode: "الوضع الفاتح",
     darkMode: "الوضع الداكن",
+    menu: "القائمة",
   },
   cat: {
     coran: "القرآن",
@@ -149,6 +151,26 @@ export const ar: Dictionary = {
     updateTitle: "إصدار جديد متوفّر",
     updateDescription: "أعد التحميل لتطبيق آخر التحديثات.",
     updateReload: "إعادة التحميل",
+  },
+  azkar: {
+    title: "الأذكار",
+    subtitle: "أذكار نبوية لكل لحظة في اليوم.",
+    itemsCount: "ذكر",
+    playAudio: "تشغيل الصوت",
+    stopAudio: "إيقاف الصوت",
+    reset: "إعادة العدّاد",
+    noArabicVoice:
+      "لا توجد لغة عربية مثبّتة على هذا المتصفّح. الصوت معطّل. (iOS / macOS: صوت Maged؛ أندرويد: Arabic؛ ويندوز: أضف اللغة العربية في إعدادات النظام.)",
+  },
+  login: {
+    subtitle: "سجّل الدخول للوصول إلى المكتبة",
+    username: "اسم المستخدم",
+    password: "كلمة المرور",
+    submit: "تسجيل الدخول",
+    submitPending: "جارٍ تسجيل الدخول…",
+    logout: "تسجيل الخروج",
+    accountTitle: "الحساب",
+    accountDesc: "إدارة جلسة تسجيل الدخول.",
   },
   reader: {
     pages: "صفحات",

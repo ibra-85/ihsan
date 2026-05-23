@@ -14,11 +14,13 @@ export const en: Dictionary = {
   },
   nav: {
     library: "Library",
+    azkar: "Azkar",
     bookmarks: "Bookmarks",
     settings: "Settings",
     learn: "Learn",
     lightMode: "Light mode",
     darkMode: "Dark mode",
+    menu: "Menu",
   },
   cat: {
     coran: "Quran",
@@ -149,6 +151,26 @@ export const en: Dictionary = {
     updateTitle: "A new version is available",
     updateDescription: "Reload to apply the latest updates.",
     updateReload: "Reload",
+  },
+  azkar: {
+    title: "Azkar — Invocations",
+    subtitle: "Prophetic invocations for every moment of the day.",
+    itemsCount: "invocation(s)",
+    playAudio: "Play pronunciation",
+    stopAudio: "Stop audio",
+    reset: "Reset counter",
+    noArabicVoice:
+      "No Arabic voice is installed on this browser. Audio is disabled. (On iOS / macOS: \"Maged\" voice; on Android: \"Arabic\"; on Windows: add Arabic language in system settings.)",
+  },
+  login: {
+    subtitle: "Sign in to access the library",
+    username: "Username",
+    password: "Password",
+    submit: "Sign in",
+    submitPending: "Signing in…",
+    logout: "Sign out",
+    accountTitle: "Account",
+    accountDesc: "Manage your sign-in session.",
   },
   reader: {
     pages: "pages",

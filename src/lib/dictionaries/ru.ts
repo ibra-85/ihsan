@@ -14,11 +14,13 @@ export const ru: Dictionary = {
   },
   nav: {
     library: "Библиотека",
+    azkar: "Азкары",
     bookmarks: "Закладки",
     settings: "Настройки",
     learn: "Обучение",
     lightMode: "Светлая тема",
     darkMode: "Тёмная тема",
+    menu: "Меню",
   },
   cat: {
     coran: "Коран",
@@ -149,6 +151,26 @@ export const ru: Dictionary = {
     updateTitle: "Доступна новая версия",
     updateDescription: "Перезагрузите, чтобы применить обновления.",
     updateReload: "Перезагрузить",
+  },
+  azkar: {
+    title: "Азкары — Поминания",
+    subtitle: "Пророческие поминания для каждого момента дня.",
+    itemsCount: "поминание(й)",
+    playAudio: "Прослушать произношение",
+    stopAudio: "Остановить",
+    reset: "Сбросить счётчик",
+    noArabicVoice:
+      "Арабский голос не установлен в этом браузере. Аудио отключено. (iOS / macOS: голос «Maged»; Android: «Arabic»; Windows: добавьте арабский язык в системных настройках.)",
+  },
+  login: {
+    subtitle: "Войдите, чтобы получить доступ к библиотеке",
+    username: "Имя пользователя",
+    password: "Пароль",
+    submit: "Войти",
+    submitPending: "Вход…",
+    logout: "Выйти",
+    accountTitle: "Аккаунт",
+    accountDesc: "Управление сеансом входа.",
   },
   reader: {
     pages: "стр.",

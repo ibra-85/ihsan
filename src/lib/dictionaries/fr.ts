@@ -12,11 +12,13 @@ export const fr = {
   },
   nav: {
     library: "Bibliothèque",
+    azkar: "Azkar",
     bookmarks: "Marque-pages",
     settings: "Paramètres",
     learn: "Apprendre",
     lightMode: "Mode clair",
     darkMode: "Mode sombre",
+    menu: "Menu",
   },
   cat: {
     coran: "Coran",
@@ -147,6 +149,26 @@ export const fr = {
     updateTitle: "Nouvelle version disponible",
     updateDescription: "Rechargez pour appliquer les dernières mises à jour.",
     updateReload: "Recharger",
+  },
+  azkar: {
+    title: "Azkar — Invocations",
+    subtitle: "Invocations prophétiques pour chaque moment de la journée.",
+    itemsCount: "invocation(s)",
+    playAudio: "Écouter la prononciation",
+    stopAudio: "Arrêter l'audio",
+    reset: "Réinitialiser le compteur",
+    noArabicVoice:
+      "Aucune voix arabe n'est installée sur ce navigateur. L'audio est désactivé. (Sur iOS / macOS : voix « Maged » ; sur Android : « Arabic » ; sur Windows : ajouter une langue arabe dans les paramètres système.)",
+  },
+  login: {
+    subtitle: "Connectez-vous pour accéder à la bibliothèque",
+    username: "Identifiant",
+    password: "Mot de passe",
+    submit: "Se connecter",
+    submitPending: "Connexion…",
+    logout: "Se déconnecter",
+    accountTitle: "Compte",
+    accountDesc: "Gérer votre session de connexion.",
   },
   reader: {
     pages: "pages",

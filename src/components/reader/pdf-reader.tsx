@@ -119,6 +119,70 @@ class PdfErrorBoundary extends Component<
   }
 }
 
+/**
+ * Champ de saisie de page autonome.
+ *
+ * Pourquoi un composant dédié : `value={currentPage}` + `onChange={goTo}`
+ * direct provoque un `goTo()` après chaque chiffre tapé → l'utilisateur
+ * voulait taper "150" mais on saute à la page 1 dès le premier chiffre,
+ * ce qui scrolle, déclenche un re-render et perturbe la saisie.
+ *
+ * Comportement actuel :
+ *  - Saisie purement locale (state `value`)
+ *  - Commit auto-debouncé 500ms après la dernière frappe
+ *  - Commit immédiat sur Enter ou blur
+ *  - Sync externe (boutons préc/suiv) ignorée tant que l'input a le focus
+ *    pour ne pas écraser ce que l'utilisateur est en train d'écrire.
+ */
+function PageInput({
+  current,
+  total,
+  onCommit,
+}: {
+  current: number;
+  total: number;
+  onCommit: (page: number) => void;
+}) {
+  const [value, setValue] = useState(String(current));
+  const focusedRef = useRef(false);
+
+  // Sync externe (clic précédent / suivant / lien) : on remplace la valeur
+  // affichée par currentPage, mais seulement si l'input n'a pas le focus.
+  useEffect(() => {
+    if (!focusedRef.current) setValue(String(current));
+  }, [current]);
+
+  // Commit debouncé : 500 ms après la dernière frappe, si la valeur est
+  // valide et différente de la page actuelle, on déclenche la navigation.
+  useEffect(() => {
+    if (value === String(current)) return;
+    const n = parseInt(value, 10);
+    if (!Number.isFinite(n) || n < 1 || n > total) return;
+    const tid = setTimeout(() => onCommit(n), 500);
+    return () => clearTimeout(tid);
+  }, [value, current, total, onCommit]);
+
+  return (
+    <Input
+      type="number"
+      inputMode="numeric"
+      value={value}
+      min={1}
+      max={total}
+      onChange={(e) => setValue(e.target.value)}
+      onFocus={(e) => { focusedRef.current = true; e.currentTarget.select(); }}
+      onBlur={() => {
+        focusedRef.current = false;
+        const n = parseInt(value, 10);
+        if (!Number.isFinite(n) || n < 1 || n > total) setValue(String(current));
+        else if (n !== current) onCommit(n);
+      }}
+      onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+      className="w-20 h-7 text-center text-sm tabular-nums px-1"
+    />
+  );
+}
+
 export function PdfReader({ doc }: { doc: DocType }) {
   const { t, f, locale } = useI18n();
   const [numPages, setNumPages]       = useState(0);
@@ -128,7 +192,8 @@ export function PdfReader({ doc }: { doc: DocType }) {
   const [bookmarked, setBookmarked]   = useState(false);
   const [showNotes, setShowNotes]     = useState(false);
   const [showThumbs, setShowThumbs]   = useState(false);
-  const [continuous, setContinuous]   = useState(false);
+  // Mode lecture continue activé par défaut (lecture verticale page par page).
+  const [continuous, setContinuous]   = useState(true);
   // Plage de pages effectivement visibles dans le viewport (mode continu).
   // Utilisé en union avec la fenêtre ±RENDER_WINDOW autour de currentPage
   // → les pages visibles sont toujours rendues même quand le scroll est en
@@ -140,7 +205,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
   // react-pdf (qui peut prendre 100-300ms par page). Limité pour borner la
   // mémoire (chaque canvas pèse ~5 Mo à scale=1).
   const [recentPages, setRecentPages] = useState<number[]>([]);
-  const MAX_RECENT_PAGES = 12;
+  const MAX_RECENT_PAGES = 25;
   // Dimensions natives d'une page (lues sur la page 1 dès que le PDF est chargé).
   // Sert à dimensionner les placeholders gris du mode continu pour que leur
   // hauteur corresponde à celle des canvas réels — sans ça, quand une rangée
@@ -152,6 +217,14 @@ export function PdfReader({ doc }: { doc: DocType }) {
   // utiliserait la dimension de la page 1, et le canvas réel d'une page
   // hétérogène serait plus haut → décalage cumulé pendant le scroll.
   const [pageSizes, setPageSizes] = useState<Map<number, { width: number; height: number }>>(new Map());
+  // Cache des pages déjà rasterisées sous forme de data URL JPEG.
+  // Approche Chrome PDF viewer : une page rendue une fois reste affichable
+  // instantanément sous forme d'image, même quand elle quitte la fenêtre de
+  // rendu react-pdf. Évite la re-rasterisation coûteuse lors d'un scroll
+  // rapide en va-et-vient. Ref + tick pour forcer un re-render quand le cache
+  // change (les refs ne déclenchent pas de re-render).
+  const pageImagesRef = useRef<Map<number, string>>(new Map());
+  const [imageCacheTick, setImageCacheTick] = useState(0);
   const [notes, setNotes]             = useState<Note[]>([]);
   const [newNote, setNewNote]         = useState("");
   const [loading, setLoading]         = useState(true);
@@ -251,6 +324,96 @@ export function PdfReader({ doc }: { doc: DocType }) {
   // donc dès que le user voit le contenu les placeholders ont la bonne hauteur.
   const [pdfProxy, setPdfProxy] = useState<PdfProxy | null>(null);
 
+  /* ── Pré-rendu en arrière-plan (approche Chrome PDF viewer) ──────
+   * Une fois le PDF chargé, on rend silencieusement chaque page en JPEG via
+   * pdf.js dans un canvas offscreen, en utilisant `requestIdleCallback` pour
+   * ne s'exécuter QUE quand le CPU est libre. Résultat : après quelques
+   * secondes en background, toutes les pages ont une image cachée → un scroll
+   * rapide affiche `<img>` instantané pour chaque page traversée. */
+  useEffect(() => {
+    if (!pdfProxy) return;
+    let cancelled = false;
+
+    const renderPageToCache = async (pageNum: number) => {
+      if (cancelled || pageImagesRef.current.has(pageNum)) return;
+      try {
+        const page = await pdfProxy.getPage(pageNum);
+        if (cancelled) return;
+        // scale 1.2 = bon compromis netteté / taille (ce sera juste un placeholder).
+        const vp = page.getViewport({ scale: 1.2 });
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(vp.width);
+        canvas.height = Math.round(vp.height);
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        await page.render({ canvasContext: ctx, viewport: vp }).promise;
+        if (cancelled) return;
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.55);
+        pageImagesRef.current.set(pageNum, dataUrl);
+        // eslint-disable-next-line no-console
+        console.log(`[pdf] bg-rendered page ${pageNum} (${Math.round(dataUrl.length / 1024)} kB, total ${pageImagesRef.current.size}/${pdfProxy.numPages})`);
+        setImageCacheTick(t => t + 1);
+      } catch (err) {
+        console.warn(`[pdf] bg-render failed for page ${pageNum}:`, err);
+      }
+    };
+
+    // Construit l'ordre de pré-rendu : on commence par le centre, puis on
+    // s'étend vers les bords. Plus probable que l'utilisateur soit autour
+    // du milieu plutôt qu'aux extrémités.
+    const buildQueue = (): number[] => {
+      const total = pdfProxy.numPages;
+      const queue: number[] = [];
+      // priorité 1 : pages 1 à 5 (l'utilisateur commence souvent ici)
+      for (let i = 1; i <= Math.min(5, total); i++) queue.push(i);
+      // priorité 2 : depuis currentPage en spirale
+      const center = Math.max(1, Math.min(currentPage, total));
+      let offset = 1;
+      while (queue.length < total) {
+        const above = center - offset;
+        const below = center + offset;
+        if (above >= 1 && !queue.includes(above)) queue.push(above);
+        if (below <= total && !queue.includes(below)) queue.push(below);
+        offset++;
+        if (offset > total) break;
+      }
+      // priorité 3 : reste (au cas où, garantit de couvrir tout)
+      for (let i = 1; i <= total; i++) if (!queue.includes(i)) queue.push(i);
+      return queue;
+    };
+
+    const queue = buildQueue();
+    let idx = 0;
+
+    // requestIdleCallback peut ne pas exister (Safari < 16) → fallback setTimeout.
+    type IdleCb = (cb: () => void) => number;
+    const schedule: IdleCb = (cb) => {
+      if (typeof window.requestIdleCallback === "function") {
+        return window.requestIdleCallback(() => cb(), { timeout: 2000 });
+      }
+      return window.setTimeout(cb, 200);
+    };
+
+    const runNext = () => {
+      if (cancelled || idx >= queue.length) return;
+      const pageNum = queue[idx++];
+      schedule(async () => {
+        await renderPageToCache(pageNum);
+        runNext();
+      });
+    };
+
+    // Démarre après un court délai pour laisser la première rasterisation
+    // visuelle se faire en priorité (UX au load).
+    const startTimer = window.setTimeout(runNext, 800);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(startTimer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pdfProxy]);
+
   /* ── Init : hash URL prioritaire sur localStorage ── */
   useEffect(() => {
     const hash = typeof window !== "undefined" ? window.location.hash : "";
@@ -301,14 +464,6 @@ export function PdfReader({ doc }: { doc: DocType }) {
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  }, []);
-
-  /* ── Mode scroll continu par défaut sur mobile ───── */
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (window.matchMedia("(max-width: 639px)").matches) {
-      setContinuous(true);
-    }
   }, []);
 
   /* ── Pinch-to-zoom mobile (2 doigts) ──────────────── */
@@ -433,9 +588,18 @@ export function PdfReader({ doc }: { doc: DocType }) {
       }
       if (active > 0) setCurrentPage(active);
       if (firstVis > 0 && lastVis > 0) {
-        setVisibleRange(prev =>
-          prev.start === firstVis && prev.end === lastVis ? prev : { start: firstVis, end: lastVis },
-        );
+        setVisibleRange(prev => {
+          if (prev.start === firstVis && prev.end === lastVis) return prev;
+          // Log + diagnostic des hauteurs autour du viewport pour détecter
+          // un éventuel drift (pages au-dessus qui changent de hauteur).
+          const totalH = pageRefs.current.reduce((sum, el) => sum + (el?.offsetHeight || 0), 0);
+          // eslint-disable-next-line no-console
+          console.log(
+            `[pdf] visibleRange → [${firstVis}, ${lastVis}] active=${active} ` +
+            `cached=${pageImagesRef.current.size} scrollTop=${root.scrollTop} totalH=${totalH}`,
+          );
+          return { start: firstVis, end: lastVis };
+        });
         // Touche le LRU : on déplace les pages visibles en fin de liste (= plus récentes)
         const fv = firstVis, lv = lastVis;
         setRecentPages(prev => {
@@ -452,6 +616,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
       if (rafId === null) rafId = requestAnimationFrame(measure);
     };
 
+    let scrollLogCount = 0;
     const onScroll = () => {
       const now = performance.now();
       const dy = Math.abs(root.scrollTop - lastY);
@@ -460,16 +625,20 @@ export function PdfReader({ doc }: { doc: DocType }) {
       lastY = root.scrollTop;
       lastT = now;
 
+      // Log allégé : 1 sur 5 événements + tous les pics rapides.
+      if (velocity >= FAST_THRESHOLD || scrollLogCount++ % 5 === 0) {
+        // eslint-disable-next-line no-console
+        console.log(`[pdf] scroll v=${velocity.toFixed(2)}px/ms ${velocity >= FAST_THRESHOLD ? "FAST(defer)" : "normal"} scrollTop=${root.scrollTop}`);
+      }
+
       if (velocity < FAST_THRESHOLD) {
-        // Scroll lent / normal : update à chaque rAF comme avant.
         scheduleMeasure();
       }
-      // Toujours programmer un update final à l'arrêt du scroll (≈120ms
-      // après le dernier événement). C'est ce qui rafraîchit visibleRange
-      // après un drag rapide de la scrollbar.
       if (stopTimer !== null) clearTimeout(stopTimer);
       stopTimer = window.setTimeout(() => {
         stopTimer = null;
+        // eslint-disable-next-line no-console
+        console.log(`[pdf] scroll stopped, triggering final measure`);
         scheduleMeasure();
       }, 120);
     };
@@ -608,17 +777,40 @@ export function PdfReader({ doc }: { doc: DocType }) {
 
   const pageNotes = notes.filter(n => n.page === currentPage);
 
+  /* ── Capture d'une page rendue en image ──────────────
+   * Stratégie "Chrome-like" : dès qu'une Page react-pdf finit de se rendre,
+   * on capture son canvas en JPEG. Les visites suivantes peuvent afficher
+   * cette image instantanément (juste un <img>), même quand la page sort
+   * de la fenêtre de rendu — pas de re-rasterisation. */
+  const handlePageRenderSuccess = useCallback((pageNum: number) => {
+    if (pageImagesRef.current.has(pageNum)) return;
+    const wrapper = pageRefs.current[pageNum - 1];
+    const canvas = wrapper?.querySelector("canvas") as HTMLCanvasElement | null;
+    if (!canvas) return;
+    try {
+      // JPEG 0.6 = ~30-80 Ko/page, 288 pages × 60 Ko ≈ 17 Mo de RAM max.
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.6);
+      pageImagesRef.current.set(pageNum, dataUrl);
+      // eslint-disable-next-line no-console
+      console.log(`[pdf] cached page ${pageNum} (${Math.round(dataUrl.length / 1024)} kB, total ${pageImagesRef.current.size})`);
+      setImageCacheTick(t => t + 1);
+    } catch (err) {
+      // Cross-origin canvas peut bloquer toDataURL — pdf.js render local OK.
+      console.warn(`[pdf] failed to cache page ${pageNum}:`, err);
+    }
+  }, []);
+
   /* ── Rendu page (mode continu) ────────────────────── */
+  // Référencer imageCacheTick pour que React re-render quand le cache change.
+  void imageCacheTick;
   const renderContinuousPage = (pageNum: number) => {
-    // Une page est rendue si :
-    //  - elle est dans la fenêtre étroite autour de la page courante
-    //  - OU elle est dans le viewport courant (± 1 viewport de marge)
-    //  - OU elle est dans le LRU des pages récemment vues (évite la re-rasterisation
-    //    coûteuse de react-pdf quand on revient sur une page déjà visitée)
     const inWindow =
       Math.abs(pageNum - currentPage) <= RENDER_WINDOW ||
       (pageNum >= visibleRange.start && pageNum <= visibleRange.end) ||
       recentPages.includes(pageNum);
+    const cachedImage = pageImagesRef.current.get(pageNum);
+    const w = (pageSizes.get(pageNum)?.width  ?? pageSize?.width  ?? 595) * scale;
+    const h = (pageSizes.get(pageNum)?.height ?? pageSize?.height ?? 842) * scale;
     return (
       <div
         key={pageNum}
@@ -628,20 +820,34 @@ export function PdfReader({ doc }: { doc: DocType }) {
       >
         <div className="text-[10px] text-white/60 font-mono select-none">{pageNum}</div>
         {inWindow ? (
-          <div className="relative shadow-lg rounded overflow-hidden">
+          // Wrapper avec dimensions VERROUILLÉES — peu importe ce que
+          // react-pdf fait à l'intérieur (placeholder → canvas transition),
+          // la hauteur de cette div reste fixe. C'est crucial pour éviter
+          // tout layout shift cumulatif qui ferait dériver le scrollTop.
+          <div
+            className="relative shadow-lg rounded overflow-hidden"
+            style={{ width: `${w}px`, height: `${h}px` }}
+          >
             <Page
               pageNumber={pageNum}
               scale={scale}
               renderTextLayer={false}
               renderAnnotationLayer={false}
+              onRenderSuccess={() => handlePageRenderSuccess(pageNum)}
               loading={
-                <div
-                  className="bg-muted/30 rounded animate-pulse"
-                  style={{
-                    width: `${(pageSizes.get(pageNum)?.width ?? pageSize?.width ?? 595) * scale}px`,
-                    height: `${(pageSizes.get(pageNum)?.height ?? pageSize?.height ?? 842) * scale}px`,
-                  }}
-                />
+                cachedImage ? (
+                  <img
+                    src={cachedImage}
+                    alt=""
+                    draggable={false}
+                    style={{ width: `${w}px`, height: `${h}px`, display: "block" }}
+                  />
+                ) : (
+                  <div
+                    className="bg-muted/30 rounded animate-pulse"
+                    style={{ width: `${w}px`, height: `${h}px` }}
+                  />
+                )
               }
             />
             <DrawingLayer
@@ -658,13 +864,21 @@ export function PdfReader({ doc }: { doc: DocType }) {
               textItalic={textItalic}
             />
           </div>
+        ) : cachedImage ? (
+          // Hors fenêtre + image cachée → on l'affiche tel quel (zéro coût CPU).
+          <div className="relative shadow-lg rounded overflow-hidden">
+            <img
+              src={cachedImage}
+              alt=""
+              draggable={false}
+              style={{ width: `${w}px`, height: `${h}px`, display: "block" }}
+            />
+          </div>
         ) : (
+          // Hors fenêtre et jamais rendue → simple placeholder gris.
           <div
             className="bg-white/10 rounded"
-            style={{
-              width: `${(pageSizes.get(pageNum)?.width ?? pageSize?.width ?? 595) * scale}px`,
-              height: `${(pageSizes.get(pageNum)?.height ?? pageSize?.height ?? 842) * scale}px`,
-            }}
+            style={{ width: `${w}px`, height: `${h}px` }}
           />
         )}
       </div>
@@ -958,6 +1172,12 @@ export function PdfReader({ doc }: { doc: DocType }) {
           style={{
             padding: continuous ? "1.5rem 1.5rem 0" : "1.5rem",
             alignItems: "safe center",
+            // overflowAnchor: "none" — empêche le navigateur de réajuster
+            // automatiquement scrollTop quand des éléments au-dessus du
+            // viewport changent de hauteur. Maintenant que chaque wrapper
+            // de page a une hauteur figée, cette ancre n'a plus rien à
+            // compenser — on la désactive pour éviter toute dérive résiduelle.
+            overflowAnchor: "none",
           }}
         >
           {loading && (
@@ -1136,13 +1356,10 @@ export function PdfReader({ doc }: { doc: DocType }) {
           <HugeiconsIcon icon={ArrowLeft01Icon} />
         </Button>
         <div className="flex items-center gap-1.5">
-          <Input
-            type="number"
-            value={currentPage}
-            min={1}
-            max={numPages}
-            onChange={e => goTo(parseInt(e.target.value) || 1)}
-            className="w-20 h-7 text-center text-sm tabular-nums px-1"
+          <PageInput
+            current={currentPage}
+            total={numPages}
+            onCommit={goTo}
           />
           <span className="text-sm text-muted-foreground">/ {numPages || "—"}</span>
         </div>
