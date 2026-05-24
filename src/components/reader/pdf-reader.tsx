@@ -32,6 +32,7 @@ import {
   addBookmark, removeBookmark, isBookmarked,
   getNotes, saveNote, deleteNote, getLastPage, setLastPage,
   addReadingTime, exportNotesAsTxt,
+  getZoom, setZoom,
   type Note,
 } from "@/lib/store";
 import { Button } from "@/components/ui/button";
@@ -339,7 +340,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
     const ratio = Math.min(1, Math.max(0, (refY - rect.top) / rect.height));
     zoomAnchorRef.current = { page: pageNum, ratio };
     // eslint-disable-next-line no-console
-    console.log(`[pdf] zoom anchor captured page=${pageNum} ratio=${ratio.toFixed(3)}`);
+    // console.log(`[pdf] zoom anchor captured page=${pageNum} ratio=${ratio.toFixed(3)}`);
   }, [continuous]);
 
   // Restaure le scrollTop pour remettre la page ancrée au même ratio sous la
@@ -370,9 +371,9 @@ export function PdfReader({ doc }: { doc: DocType }) {
     });
 
     // eslint-disable-next-line no-console
-    console.log(
-      `[pdf] zoom anchor restored page=${anchor.page} ratio=${anchor.ratio.toFixed(3)} scrollTop=${Math.round(root.scrollTop)}`,
-    );
+    // console.log(
+    //   `[pdf] zoom anchor restored page=${anchor.page} ratio=${anchor.ratio.toFixed(3)} scrollTop=${Math.round(root.scrollTop)}`,
+    // );
     zoomAnchorRef.current = null;
   }, [scale, continuous]);
 
@@ -393,7 +394,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
     pauseBgRender(6000);
     setRecentPages([]);
     // eslint-disable-next-line no-console
-    console.log(`[pdf] visual scale changed to ${scale}, renderScale pending`);
+    // console.log(`[pdf] visual scale changed to ${scale}, renderScale pending`);
 
     if (renderScaleTimerRef.current !== null) {
       window.clearTimeout(renderScaleTimerRef.current);
@@ -405,20 +406,27 @@ export function PdfReader({ doc }: { doc: DocType }) {
     renderScaleTimerRef.current = window.setTimeout(() => {
       setRenderScale(scale);
       renderScaleTimerRef.current = null;
+      // Persiste le zoom au commit (1 écriture par rafale grâce au debounce,
+      // au lieu d'1 par micro-step si on persistait à chaque setScale).
+      setZoom(doc.id, scale);
       // eslint-disable-next-line no-console
-      console.log(`[pdf] renderScale committed ${scale}`);
+      // console.log(`[pdf] renderScale committed ${scale} (persisted for ${doc.id})`);
     }, 600);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scale]);
 
-  // Cleanup du timer renderScale au démontage du composant.
+  // Cleanup du timer renderScale au démontage du composant. Si un debounce
+  // est encore en attente (user a zoomé puis quitté en < 600ms), on persiste
+  // quand même le scale courant pour ne pas perdre son réglage.
   useEffect(() => {
     return () => {
       if (renderScaleTimerRef.current !== null) {
         window.clearTimeout(renderScaleTimerRef.current);
         renderScaleTimerRef.current = null;
+        setZoom(doc.id, scaleRef.current);
       }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const drawModeRef  = useRef(drawMode);
   useEffect(() => { drawModeRef.current = drawMode; }, [drawMode]);
@@ -528,7 +536,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
     // bg-render reprend normalement.
     if (scale >= 1.5) {
       // eslint-disable-next-line no-console
-      console.log(`[pdf] bg-render disabled at scale=${scale} (>= 1.5)`);
+      // console.log(`[pdf] bg-render disabled at scale=${scale} (>= 1.5)`);
       return;
     }
     let cancelled = false;
@@ -552,7 +560,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
         const dataUrl = canvas.toDataURL("image/jpeg", 0.55);
         pageImagesRef.current.set(pageNum, dataUrl);
         // eslint-disable-next-line no-console
-        console.log(`[pdf] bg-rendered page ${pageNum} (${Math.round(dataUrl.length / 1024)} kB, total ${pageImagesRef.current.size}/${pdfProxy.numPages})`);
+        // console.log(`[pdf] bg-rendered page ${pageNum} (${Math.round(dataUrl.length / 1024)} kB, total ${pageImagesRef.current.size}/${pdfProxy.numPages})`);
         setImageCacheTick(t => t + 1);
       } catch (err) {
         // RenderTask cancel rejette avec une "RenderingCancelledException" — ignorer.
@@ -594,9 +602,9 @@ export function PdfReader({ doc }: { doc: DocType }) {
       for (let page = 1; page <= Math.min(5, total); page++) push(page);
 
       // eslint-disable-next-line no-console
-      console.log(
-        `[pdf] bg queue rebuilt visible=[${start}, ${end}] radius=${BG_RENDER_RADIUS} size=${queue.length}/${total}`,
-      );
+      // console.log(
+      //   `[pdf] bg queue rebuilt visible=[${start}, ${end}] radius=${BG_RENDER_RADIUS} size=${queue.length}/${total}`,
+      // );
       return queue;
     };
 
@@ -655,6 +663,9 @@ export function PdfReader({ doc }: { doc: DocType }) {
   }, []);
 
   /* ── Init : hash URL prioritaire sur localStorage ── */
+  // Mémorise la page cible au mount, consommée par le useEffect ci-dessous
+  // qui déclenche le scrollIntoView dès que le PDF est chargé.
+  const initialPageRef = useRef<number | null>(null);
   useEffect(() => {
     const hash = typeof window !== "undefined" ? window.location.hash : "";
     const match = hash.match(/#p(\d+)/);
@@ -664,7 +675,45 @@ export function PdfReader({ doc }: { doc: DocType }) {
     setCurrentPage(startPage);
     setBookmarked(isBookmarked(doc.id, startPage));
     setNotes(getNotes(doc.id));
+    // Mémorise la page initiale pour scroller dessus en mode continu après
+    // que le PDF soit chargé et que les wrappers de pages soient mountés.
+    // setCurrentPage seul ne suffit pas : en mode continu, le viewport reste
+    // scrollé à 0 (page 1) tant qu'on ne fait pas un scrollIntoView explicite.
+    initialPageRef.current = startPage;
+    // Restaure le zoom mémorisé pour ce document. On force firstScaleSyncRef
+    // à true avant le setScale → la prochaine exécution de l'effet [scale]
+    // commit renderScale synchronément, sans debounce 600ms ni pauseBgRender
+    // (qui seraient inutiles au mount, quand rien n'est encore rendu).
+    const savedZoom = getZoom(doc.id);
+    if (savedZoom !== null && savedZoom !== scale) {
+      firstScaleSyncRef.current = true;
+      setScale(savedZoom);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc.id]);
+
+  // Scroll vers la page initiale (savedPage ou hashPage) une fois le PDF
+  // chargé. Déclenché quand numPages passe de 0 à >0 ou quand continuous
+  // change. La ref initialPageRef garde la cible le temps d'attendre les
+  // wrappers de pages, puis est vidée pour ne plus se redéclencher.
+  useEffect(() => {
+    if (numPages === 0) return;
+    const target = initialPageRef.current;
+    if (target === null) return;
+    initialPageRef.current = null;
+    if (target <= 1) return;
+    // Mode paginé : currentPage suffit, le composant n'affiche qu'une page.
+    if (!continuous) return;
+    // RAF laisse le temps à React de monter les wrappers (créés par
+    // Array.from({ length: numPages }, ...) dans le rendu continu).
+    const id = window.requestAnimationFrame(() => {
+      const el = pageRefs.current[target - 1];
+      if (el) {
+        el.scrollIntoView({ behavior: "instant", block: "start" });
+      }
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [numPages, continuous]);
 
   /* ── Sync page → localStorage + hash ─────────────── */
   useEffect(() => {
@@ -836,12 +885,12 @@ export function PdfReader({ doc }: { doc: DocType }) {
           if (prev.start === firstVis && prev.end === lastVis) return prev;
           // Log + diagnostic des hauteurs autour du viewport pour détecter
           // un éventuel drift (pages au-dessus qui changent de hauteur).
-          const totalH = pageRefs.current.reduce((sum, el) => sum + (el?.offsetHeight || 0), 0);
+          // const totalH = pageRefs.current.reduce((sum, el) => sum + (el?.offsetHeight || 0), 0);
           // eslint-disable-next-line no-console
-          console.log(
-            `[pdf] visibleRange → [${firstVis}, ${lastVis}] active=${active} ` +
-            `cached=${pageImagesRef.current.size} scrollTop=${root.scrollTop} totalH=${totalH}`,
-          );
+          // console.log(
+          //   `[pdf] visibleRange → [${firstVis}, ${lastVis}] active=${active} ` +
+          //   `cached=${pageImagesRef.current.size} scrollTop=${root.scrollTop} totalH=${totalH}`,
+          // );
           return { start: firstVis, end: lastVis };
         });
         // Touche le LRU : on déplace les pages visibles en fin de liste (= plus récentes)
@@ -860,7 +909,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
       if (rafId === null) rafId = requestAnimationFrame(measure);
     };
 
-    let scrollLogCount = 0;
+    // let scrollLogCount = 0;
     const onScroll = () => {
       // Met en pause le bg-render pendant 1.5s après chaque scroll : libère
       // pdf.js pour les rendus interactifs des `<Page>` visibles.
@@ -874,10 +923,10 @@ export function PdfReader({ doc }: { doc: DocType }) {
       lastT = now;
 
       // Log allégé : 1 sur 5 événements + tous les pics rapides.
-      if (velocity >= FAST_THRESHOLD || scrollLogCount++ % 5 === 0) {
-        // eslint-disable-next-line no-console
-        console.log(`[pdf] scroll v=${velocity.toFixed(2)}px/ms ${velocity >= FAST_THRESHOLD ? "FAST(defer)" : "normal"} scrollTop=${root.scrollTop}`);
-      }
+      // if (velocity >= FAST_THRESHOLD || scrollLogCount++ % 5 === 0) {
+      //   // eslint-disable-next-line no-console
+      //   console.log(`[pdf] scroll v=${velocity.toFixed(2)}px/ms ${velocity >= FAST_THRESHOLD ? "FAST(defer)" : "normal"} scrollTop=${root.scrollTop}`);
+      // }
 
       if (velocity < FAST_THRESHOLD) {
         scheduleMeasure();
@@ -886,7 +935,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
       stopTimer = window.setTimeout(() => {
         stopTimer = null;
         // eslint-disable-next-line no-console
-        console.log(`[pdf] scroll stopped, triggering final measure`);
+        // console.log(`[pdf] scroll stopped, triggering final measure`);
         scheduleMeasure();
       }, 120);
     };
@@ -1046,7 +1095,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
       const dataUrl = canvas.toDataURL("image/jpeg", 0.6);
       pageImagesRef.current.set(pageNum, dataUrl);
       // eslint-disable-next-line no-console
-      console.log(`[pdf] cached page ${pageNum} (${Math.round(dataUrl.length / 1024)} kB, total ${pageImagesRef.current.size})`);
+      // console.log(`[pdf] cached page ${pageNum} (${Math.round(dataUrl.length / 1024)} kB, total ${pageImagesRef.current.size})`);
       setImageCacheTick(t => t + 1);
     } catch (err) {
       // Cross-origin canvas peut bloquer toDataURL — pdf.js render local OK.

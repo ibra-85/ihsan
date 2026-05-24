@@ -84,6 +84,27 @@ export function setLastPage(docId: string, page: number): void {
   localStorage.setItem(`ql-progress-${docId}`, String(page));
 }
 
+// ─── Zoom par document ────────────────────────────────────
+// On mémorise le scale de chaque PDF séparément (clé `ql-zoom-{docId}`)
+// pour qu'à la réouverture, le lecteur retrouve le zoom où l'utilisateur
+// l'avait laissé. Validation borne le résultat dans [0.25, 5] — la plage
+// supportée par ZOOM_STEPS — au cas où une valeur invalide aurait été
+// écrite (ancienne version, import corrompu, manipulation manuelle).
+export function getZoom(docId: string): number | null {
+  if (typeof window === "undefined") return null;
+  const raw = localStorage.getItem(`ql-zoom-${docId}`);
+  if (raw === null) return null;
+  const n = parseFloat(raw);
+  if (!Number.isFinite(n) || n < 0.25 || n > 5) return null;
+  return n;
+}
+
+export function setZoom(docId: string, scale: number): void {
+  if (typeof window === "undefined") return;
+  if (!Number.isFinite(scale) || scale < 0.25 || scale > 5) return;
+  localStorage.setItem(`ql-zoom-${docId}`, String(scale));
+}
+
 // ─── Reading time ──────────────────────────────────────────
 export function getReadingTime(docId: string): number {
   if (typeof window === "undefined") return 0;
