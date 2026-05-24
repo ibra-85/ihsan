@@ -13,14 +13,21 @@ export async function proxy(request: NextRequest) {
   }
 
   const secret = process.env.AUTH_SECRET;
-  // Si la config d'auth n'est pas définie, on laisse passer (mode permissif
-  // pour ne pas casser le développement local avant que les vars d'env
-  // soient configurées). En prod, AUTH_SECRET DOIT être défini.
   if (!secret) {
-    if (process.env.NODE_ENV === "production") {
-      console.warn("[auth] AUTH_SECRET non défini en production — accès libre");
+    // En dev local : mode permissif pour ne pas casser le DX avant que les
+    // vars d'env soient configurées.
+    if (process.env.NODE_ENV !== "production") {
+      return NextResponse.next();
     }
-    return NextResponse.next();
+    // En production : on REFUSE l'accès. Sans secret, le cookie ne peut pas
+    // être validé → laisser passer reviendrait à désactiver silencieusement
+    // l'authentification.
+    return new NextResponse(
+      "Configuration d'authentification manquante côté serveur. " +
+      "Définissez AUTH_USERNAME, AUTH_PASSWORD et AUTH_SECRET dans les " +
+      "variables d'environnement Vercel, puis redéployez.",
+      { status: 503, headers: { "Content-Type": "text/plain; charset=utf-8" } },
+    );
   }
 
   const token = request.cookies.get(AUTH_COOKIE)?.value;

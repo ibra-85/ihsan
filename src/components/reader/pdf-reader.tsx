@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef, useMemo, Component } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo, Component } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
@@ -57,6 +57,20 @@ pdfjs.GlobalWorkerOptions.workerSrc =
 
 const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4, 5];
 const RENDER_WINDOW = 4;
+// Rayon de pré-rendu autour de la zone visible. On ne rend PAS tout le PDF :
+// avec 200-300 pages, ça crée une dette de rendu qui sature pdf.js et la RAM.
+const BG_RENDER_RADIUS = 12;
+
+// Fenêtre de rendu canvas dynamique selon le scale. À scale=2.3, une page
+// coûte ~5x plus de mémoire et de temps qu'à scale=1, donc rendre 9 pages
+// (±4) sature pdf.js. Réduire la fenêtre à haut zoom = moins de canvas
+// haute résolution simultanés, et on s'appuie sur le cache image pour le
+// reste de la zone visible.
+const getRenderWindowForScale = (scale: number): number => {
+  if (scale >= 2) return 1;
+  if (scale >= 1.5) return 2;
+  return RENDER_WINDOW;
+};
 
 type PdfViewport = { width: number; height: number };
 type PdfRenderTask = { promise: Promise<void>; cancel?: () => void };
@@ -271,22 +285,141 @@ export function PdfReader({ doc }: { doc: DocType }) {
   const scaleRef     = useRef(scale);
   useEffect(() => { scaleRef.current = scale; }, [scale]);
 
+  // Zoom en deux phases :
+  //  - `scale` change instantanément au clic zoom (pilote la taille visuelle
+  //    des wrappers, des images cachées, et l'ancre de scroll).
+  //  - `renderScale` est mis à jour APRÈS 300ms sans nouveau changement de
+  //    scale (debounce). C'est lui qui est passé à <Page scale={...}>, donc
+  //    pdf.js ne re-rasterise qu'une seule fois à la fin d'une rafale de
+  //    zoom (1.5→1.6→1.7→1.8→2→2.1→2.2→2.3 = un seul render à 2.3).
+  // Pendant la rafale, l'utilisateur voit l'image cachée étirée en CSS à la
+  // bonne taille visuelle, puis le canvas net arrive après le commit final.
+  const [renderScale, setRenderScale] = useState(1);
+  const renderScaleTimerRef = useRef<number | null>(null);
+
+  // currentPage tenu dans une ref pour pouvoir le lire de manière synchrone
+  // dans captureZoomAnchor (callback) sans re-créer la fonction à chaque page.
+  const currentPageRef = useRef(currentPage);
+  useEffect(() => { currentPageRef.current = currentPage; }, [currentPage]);
+
+  // Ancre de zoom : { page actuelle sous la refLine, ratio vertical 0-1 }.
+  // Capturée AVANT chaque changement de scale, restaurée AU layout effect
+  // qui suit le re-render avec le nouveau scale. Sans ça, scrollTop reste
+  // identique alors que la hauteur totale change → la page visible saute
+  // (ex. à scale=1.5, totalH passe de 303k à 376k px, donc le même
+  // scrollTop=205k qui pointait page 196 pointe maintenant page 158).
+  const zoomAnchorRef = useRef<{ page: number; ratio: number } | null>(null);
+
+  const captureZoomAnchor = useCallback(() => {
+    if (!continuous) return;
+    const root = pdfCanvasRef.current;
+    if (!root) return;
+
+    const rootRect = root.getBoundingClientRect();
+    const refY = rootRect.top + rootRect.height * 0.35;
+
+    let pageNum = currentPageRef.current;
+    let el: HTMLDivElement | null = pageRefs.current[pageNum - 1] ?? null;
+
+    // Sécurité : si currentPage est un peu en retard sur le scroll réel,
+    // on cherche la page qui croise la refLine à l'instant T.
+    for (let i = 0; i < pageRefs.current.length; i++) {
+      const candidate = pageRefs.current[i];
+      if (!candidate) continue;
+      const rect = candidate.getBoundingClientRect();
+      if (rect.top <= refY && rect.bottom >= refY) {
+        pageNum = i + 1;
+        el = candidate;
+        break;
+      }
+    }
+
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (refY - rect.top) / rect.height));
+    zoomAnchorRef.current = { page: pageNum, ratio };
+    // eslint-disable-next-line no-console
+    console.log(`[pdf] zoom anchor captured page=${pageNum} ratio=${ratio.toFixed(3)}`);
+  }, [continuous]);
+
+  // Restaure le scrollTop pour remettre la page ancrée au même ratio sous la
+  // refLine après que le DOM ait commit avec le nouveau scale. useLayoutEffect
+  // s'exécute SYNCHRONIQUEMENT après le commit mais AVANT le paint navigateur
+  // → aucun flash de mauvaise position visible.
+  useLayoutEffect(() => {
+    if (!continuous) return;
+    const anchor = zoomAnchorRef.current;
+    if (!anchor) return;
+    const root = pdfCanvasRef.current;
+    const el = pageRefs.current[anchor.page - 1];
+    if (!root || !el) return;
+
+    const rootRect = root.getBoundingClientRect();
+    const pageRect = el.getBoundingClientRect();
+    const pageTopInScroll = pageRect.top - rootRect.top + root.scrollTop;
+    const desiredRefOffset = root.clientHeight * 0.35;
+    const nextScrollTop = pageTopInScroll + pageRect.height * anchor.ratio - desiredRefOffset;
+
+    root.scrollTop = Math.max(0, nextScrollTop);
+
+    // Force une mesure visibleRange/currentPage maintenant que scrollTop est
+    // bon, sinon les listeners scroll ne se déclenchent pas (on a écrit
+    // scrollTop par programme, pas via interaction).
+    requestAnimationFrame(() => {
+      root.dispatchEvent(new Event("scroll"));
+    });
+
+    // eslint-disable-next-line no-console
+    console.log(
+      `[pdf] zoom anchor restored page=${anchor.page} ratio=${anchor.ratio.toFixed(3)} scrollTop=${Math.round(root.scrollTop)}`,
+    );
+    zoomAnchorRef.current = null;
+  }, [scale, continuous]);
+
   // Au changement de scale (zoom +/-, pinch, molette Ctrl) :
   //  1. Pause le bg-render → libère pdf.js pour les rendus interactifs.
-  //  2. Vide le LRU → seules les pages strictement visibles re-rasterisent
-  //     (au lieu des 10+ pages du LRU). Évite l'attente de 10s d'avant.
+  //  2. Vide le LRU → seules les pages strictement visibles re-rasterisent.
+  //  3. Debounce setRenderScale(scale) : tant que l'utilisateur zoome, on
+  //     remet le timer à zéro. <Page> ne re-rasterise qu'au commit final.
   const firstScaleSyncRef = useRef(true);
   useEffect(() => {
     if (firstScaleSyncRef.current) {
       firstScaleSyncRef.current = false;
-      return; // évite le déclenchement au mount initial
+      // Init synchrone de renderScale à la valeur initiale de scale, pour
+      // que la 1ère ouverture du PDF rende immédiatement à la bonne taille.
+      setRenderScale(scale);
+      return;
     }
-    pauseBgRender(2500);
+    pauseBgRender(6000);
     setRecentPages([]);
     // eslint-disable-next-line no-console
-    console.log(`[pdf] scale changed to ${scale}, cleared LRU, paused bg-render 2.5s`);
+    console.log(`[pdf] visual scale changed to ${scale}, renderScale pending`);
+
+    if (renderScaleTimerRef.current !== null) {
+      window.clearTimeout(renderScaleTimerRef.current);
+    }
+    // 600ms : à 300ms, le debounce committait encore au milieu des rafales
+    // (l'utilisateur fait des micro-pauses entre deux clicks zoom). 600ms
+    // couvre le rythme réel d'un zoom continu, au prix de 300ms de flou
+    // CSS supplémentaires sur l'image cachée stretchée. Si trop flou, 450ms.
+    renderScaleTimerRef.current = window.setTimeout(() => {
+      setRenderScale(scale);
+      renderScaleTimerRef.current = null;
+      // eslint-disable-next-line no-console
+      console.log(`[pdf] renderScale committed ${scale}`);
+    }, 600);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scale]);
+
+  // Cleanup du timer renderScale au démontage du composant.
+  useEffect(() => {
+    return () => {
+      if (renderScaleTimerRef.current !== null) {
+        window.clearTimeout(renderScaleTimerRef.current);
+        renderScaleTimerRef.current = null;
+      }
+    };
+  }, []);
   const drawModeRef  = useRef(drawMode);
   useEffect(() => { drawModeRef.current = drawMode; }, [drawMode]);
 
@@ -349,18 +482,55 @@ export function PdfReader({ doc }: { doc: DocType }) {
    * sinon pdf.js (qui sérialize) bloque les rendus interactifs des `<Page>`
    * visibles → impression de lenteur sur les pages visitées. */
   const bgPausedRef = useRef(false);
+  const bgPauseTimerRef = useRef<number | null>(null);
+  // Deadline absolue de fin de pause. Permet à pauseBgRender d'être monotone :
+  // un appel court (ex. 1.5s du scroll synthétique post-zoom) ne doit JAMAIS
+  // raccourcir une pause longue en cours (ex. 2.5s du changement de scale).
+  // Sans ça, on voyait bg-rendered page 8/9/10 pendant la séquence de zoom.
+  const bgPauseUntilRef = useRef(0);
   const bgCurrentTaskRef = useRef<PdfRenderTask | null>(null);
 
   const pauseBgRender = useCallback((durationMs = 1500) => {
+    const now = performance.now();
+    const until = now + durationMs;
     bgPausedRef.current = true;
-    // Annule le rendu en cours pour libérer pdf.js immédiatement.
+    // Math.max : on prend la deadline la plus tardive entre la nouvelle pause
+    // et la pause en cours. Les pauses courtes ne peuvent que prolonger,
+    // jamais raccourcir.
+    bgPauseUntilRef.current = Math.max(bgPauseUntilRef.current, until);
+
+    if (bgPauseTimerRef.current !== null) {
+      window.clearTimeout(bgPauseTimerRef.current);
+    }
     try { bgCurrentTaskRef.current?.cancel?.(); } catch { /* ignore */ }
     bgCurrentTaskRef.current = null;
-    window.setTimeout(() => { bgPausedRef.current = false; }, durationMs);
+
+    const remaining = Math.max(0, bgPauseUntilRef.current - now);
+    bgPauseTimerRef.current = window.setTimeout(() => {
+      // Garde-fou : si une pause encore plus longue a été enregistrée entre
+      // temps (rare en pratique car on clearTimeout, mais ceinture+bretelles),
+      // on ne lève pas la pause.
+      if (performance.now() >= bgPauseUntilRef.current) {
+        bgPausedRef.current = false;
+        bgPauseTimerRef.current = null;
+        bgPauseUntilRef.current = 0;
+      }
+    }, remaining);
   }, []);
 
   useEffect(() => {
     if (!pdfProxy) return;
+    // À haut zoom, le bg-render coûte trop cher pour ce qu'il rapporte :
+    // chaque rasterisation offscreen utilise pdf.js (qui sérialise) et
+    // retarde les rendus interactifs des pages visibles. On le coupe par
+    // politique au-dessus de scale 1.5. Quand l'utilisateur redescend sous
+    // ce seuil, ce useEffect se relance (scale est dans les deps) et le
+    // bg-render reprend normalement.
+    if (scale >= 1.5) {
+      // eslint-disable-next-line no-console
+      console.log(`[pdf] bg-render disabled at scale=${scale} (>= 1.5)`);
+      return;
+    }
     let cancelled = false;
 
     const renderPageToCache = async (pageNum: number) => {
@@ -393,21 +563,40 @@ export function PdfReader({ doc }: { doc: DocType }) {
       }
     };
 
+    // Queue bornée — on ne pré-rend PLUS tout le PDF. Priorité à la zone
+    // réellement visible (visibleRange), puis voisinage ±BG_RENDER_RADIUS,
+    // puis les 5 premières pages (utiles à la réouverture rapide).
+    // Cet effet est rebuilt quand visibleRange change → la queue suit l'utilisateur.
     const buildQueue = (): number[] => {
       const total = pdfProxy.numPages;
+      const seen = new Set<number>();
       const queue: number[] = [];
-      for (let i = 1; i <= Math.min(5, total); i++) queue.push(i);
-      const center = Math.max(1, Math.min(currentPage, total));
-      let offset = 1;
-      while (queue.length < total) {
-        const above = center - offset;
-        const below = center + offset;
-        if (above >= 1 && !queue.includes(above)) queue.push(above);
-        if (below <= total && !queue.includes(below)) queue.push(below);
-        offset++;
-        if (offset > total) break;
+
+      const push = (page: number) => {
+        if (page < 1 || page > total || seen.has(page)) return;
+        seen.add(page);
+        queue.push(page);
+      };
+
+      const hasVisibleRange = visibleRange.start > 0 && visibleRange.end >= visibleRange.start;
+      const start = hasVisibleRange
+        ? visibleRange.start
+        : Math.max(1, Math.min(currentPage, total));
+      const end = hasVisibleRange
+        ? visibleRange.end
+        : Math.max(1, Math.min(currentPage, total));
+
+      for (let page = start; page <= end; page++) push(page);
+      for (let offset = 1; offset <= BG_RENDER_RADIUS; offset++) {
+        push(start - offset);
+        push(end + offset);
       }
-      for (let i = 1; i <= total; i++) if (!queue.includes(i)) queue.push(i);
+      for (let page = 1; page <= Math.min(5, total); page++) push(page);
+
+      // eslint-disable-next-line no-console
+      console.log(
+        `[pdf] bg queue rebuilt visible=[${start}, ${end}] radius=${BG_RENDER_RADIUS} size=${queue.length}/${total}`,
+      );
       return queue;
     };
 
@@ -443,9 +632,27 @@ export function PdfReader({ doc }: { doc: DocType }) {
       window.clearTimeout(startTimer);
       try { bgCurrentTaskRef.current?.cancel?.(); } catch { /* ignore */ }
       bgCurrentTaskRef.current = null;
+      // NB : on ne clear PAS bgPauseTimerRef ici. Cet effet est ré-exécuté
+      // quand visibleRange/currentPage change, donc son cleanup tourne
+      // souvent. Annuler le timer de pause à ce moment-là laisserait
+      // bgPausedRef.current bloqué à true → bg-render coincé en pause.
+      // Le démontage de bgPauseTimerRef est géré par un effet séparé.
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pdfProxy]);
+  }, [pdfProxy, currentPage, visibleRange.start, visibleRange.end, scale]);
+
+  // Cleanup dédié au démontage du composant : annule le timer de pause du
+  // bg-render. Séparé du useEffect bg-render ci-dessus car celui-là est
+  // ré-exécuté quand visibleRange change, alors que ce timer doit survivre.
+  useEffect(() => {
+    return () => {
+      if (bgPauseTimerRef.current !== null) {
+        window.clearTimeout(bgPauseTimerRef.current);
+        bgPauseTimerRef.current = null;
+      }
+      bgPauseUntilRef.current = 0;
+    };
+  }, []);
 
   /* ── Init : hash URL prioritaire sur localStorage ── */
   useEffect(() => {
@@ -490,6 +697,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
     const onWheel = (e: WheelEvent) => {
       if (!e.ctrlKey) return;
       e.preventDefault();
+      captureZoomAnchor();
       setScale(prev => {
         const delta = e.deltaY < 0 ? 0.1 : -0.1;
         return Math.min(5, Math.max(0.25, Math.round((prev + delta) * 100) / 100));
@@ -497,7 +705,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  }, []);
+  }, [captureZoomAnchor]);
 
   /* ── Pinch-to-zoom mobile (2 doigts) ──────────────── */
   // Pendant le geste : CSS transform sur un wrapper (GPU, zéro re-render).
@@ -520,6 +728,9 @@ export function PdfReader({ doc }: { doc: DocType }) {
         wrapper.style.transformOrigin = "";
         wrapper.style.willChange = "";
       }
+      // Capture l'ancre APRÈS le reset du transform CSS, sinon les rects
+      // sont décalés par le scale visuel du pinch en cours.
+      captureZoomAnchor();
       const next = Math.min(5, Math.max(0.25, Math.round(initialScale * lastFactorRef.current * 100) / 100));
       setScale(next);
       lastFactorRef.current = 1;
@@ -571,7 +782,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
       el.removeEventListener("touchend",    onEnd);
       el.removeEventListener("touchcancel", onEnd);
     };
-  }, []);
+  }, [captureZoomAnchor]);
 
   /* ── Détection page courante (mode continu) ───────── */
   // Une ligne de référence fixe à 35% du haut du viewport. La page qui
@@ -707,12 +918,18 @@ export function PdfReader({ doc }: { doc: DocType }) {
 
   /* ── Zoom ─────────────────────────────────────────── */
   const zoomIn = () => {
+    captureZoomAnchor();
     const i = ZOOM_STEPS.findIndex(s => s > scale);
     setScale(ZOOM_STEPS[Math.min(i < 0 ? ZOOM_STEPS.length - 1 : i, ZOOM_STEPS.length - 1)]);
   };
   const zoomOut = () => {
+    captureZoomAnchor();
     const i = ZOOM_STEPS.findLastIndex(s => s < scale);
     setScale(ZOOM_STEPS[Math.max(i, 0)]);
+  };
+  const zoomReset = () => {
+    captureZoomAnchor();
+    setScale(1);
   };
 
   /* ── Mode continu ─────────────────────────────────── */
@@ -841,13 +1058,23 @@ export function PdfReader({ doc }: { doc: DocType }) {
   // Référencer imageCacheTick pour que React re-render quand le cache change.
   void imageCacheTick;
   const renderContinuousPage = (pageNum: number) => {
+    const renderWindow = getRenderWindowForScale(scale);
     const inWindow =
-      Math.abs(pageNum - currentPage) <= RENDER_WINDOW ||
+      Math.abs(pageNum - currentPage) <= renderWindow ||
       (pageNum >= visibleRange.start && pageNum <= visibleRange.end) ||
-      recentPages.includes(pageNum);
+      // À haut zoom (≥ 1.5), on coupe le coussin LRU : garder 10 pages en
+      // canvas live à cette résolution sature pdf.js. Le cache image affiche
+      // déjà les pages récemment visitées sans coût CPU.
+      (scale < 1.5 && recentPages.includes(pageNum));
     const cachedImage = pageImagesRef.current.get(pageNum);
     const w = (pageSizes.get(pageNum)?.width  ?? pageSize?.width  ?? 595) * scale;
     const h = (pageSizes.get(pageNum)?.height ?? pageSize?.height ?? 842) * scale;
+    // Pendant le debounce renderScale, wrapper et canvas sont désynchronisés :
+    // le wrapper a déjà la nouvelle taille (scale), mais <Page> est encore au
+    // renderScale précédent. Visuellement, le PDF paraît décalé/coincé. On
+    // cache donc complètement <Page> tant que renderScale n'a pas committé,
+    // et on n'affiche que l'image cachée étirée (ou un skeleton).
+    const isRenderScalePending = Math.abs(scale - renderScale) > 0.001;
     return (
       <div
         key={pageNum}
@@ -865,28 +1092,50 @@ export function PdfReader({ doc }: { doc: DocType }) {
             className="relative shadow-lg rounded overflow-hidden"
             style={{ width: `${w}px`, height: `${h}px` }}
           >
-            <Page
-              pageNumber={pageNum}
-              scale={scale}
-              renderTextLayer={false}
-              renderAnnotationLayer={false}
-              onRenderSuccess={() => handlePageRenderSuccess(pageNum)}
-              loading={
-                cachedImage ? (
-                  <img
-                    src={cachedImage}
-                    alt=""
-                    draggable={false}
-                    style={{ width: `${w}px`, height: `${h}px`, display: "block" }}
-                  />
-                ) : (
-                  <div
-                    className="bg-muted/30 rounded animate-pulse"
-                    style={{ width: `${w}px`, height: `${h}px` }}
-                  />
-                )
-              }
-            />
+            {isRenderScalePending ? (
+              // Phase 1 du zoom : on affiche l'image cachée stretchée à la
+              // nouvelle taille pour donner un retour visuel immédiat, sans
+              // monter un <Page> qui serait à la mauvaise résolution.
+              cachedImage ? (
+                <img
+                  src={cachedImage}
+                  alt=""
+                  draggable={false}
+                  style={{ width: `${w}px`, height: `${h}px`, display: "block" }}
+                />
+              ) : (
+                <div
+                  className="bg-muted/30 rounded animate-pulse"
+                  style={{ width: `${w}px`, height: `${h}px` }}
+                />
+              )
+            ) : (
+              // Phase 2 : renderScale a commit, on monte <Page> proprement
+              // à la bonne résolution.
+              <Page
+                key={`page-${pageNum}-${renderScale}`}
+                pageNumber={pageNum}
+                scale={renderScale}
+                renderTextLayer={false}
+                renderAnnotationLayer={false}
+                onRenderSuccess={() => handlePageRenderSuccess(pageNum)}
+                loading={
+                  cachedImage ? (
+                    <img
+                      src={cachedImage}
+                      alt=""
+                      draggable={false}
+                      style={{ width: `${w}px`, height: `${h}px`, display: "block" }}
+                    />
+                  ) : (
+                    <div
+                      className="bg-muted/30 rounded animate-pulse"
+                      style={{ width: `${w}px`, height: `${h}px` }}
+                    />
+                  )
+                }
+              />
+            )}
             <DrawingLayer
               key={`${doc.id}-${pageNum}-${drawClearVersion}`}
               docId={doc.id}
@@ -979,7 +1228,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
             <Button variant="ghost" size="icon-sm" onClick={zoomIn} title={t.reader.zoomIn}>
               <HugeiconsIcon icon={ZoomInAreaIcon} />
             </Button>
-            <Button variant="ghost" size="icon-sm" onClick={() => setScale(1)} title={t.reader.zoomReset}>
+            <Button variant="ghost" size="icon-sm" onClick={zoomReset} title={t.reader.zoomReset}>
               <HugeiconsIcon icon={Rotate01Icon} />
             </Button>
             <Separator orientation="vertical" className="h-6 mx-1.5" />
@@ -1091,7 +1340,7 @@ export function PdfReader({ doc }: { doc: DocType }) {
                   <Button variant="outline" size="icon-sm" onClick={zoomOut} className="flex-1" title={t.reader.zoomOut}>
                     <HugeiconsIcon icon={ZoomOutAreaIcon} />
                   </Button>
-                  <Button variant="outline" size="icon-sm" onClick={() => setScale(1)} className="flex-1" title={t.reader.zoomReset}>
+                  <Button variant="outline" size="icon-sm" onClick={zoomReset} className="flex-1" title={t.reader.zoomReset}>
                     <HugeiconsIcon icon={Rotate01Icon} />
                   </Button>
                   <Button variant="outline" size="icon-sm" onClick={zoomIn} className="flex-1" title={t.reader.zoomIn}>
@@ -1301,8 +1550,9 @@ export function PdfReader({ doc }: { doc: DocType }) {
                   : (
                     <div className="relative shadow-lg rounded overflow-hidden">
                       <Page
+                        key={`page-${currentPage}-${renderScale}`}
                         pageNumber={currentPage}
-                        scale={scale}
+                        scale={renderScale}
                         renderTextLayer={false}
                         renderAnnotationLayer={false}
                       />
